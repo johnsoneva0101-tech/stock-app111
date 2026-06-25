@@ -32,7 +32,7 @@ def init_db():
             period TEXT DEFAULT '中期波段',
             strategy_type TEXT DEFAULT '2倍風險停利法',
             stop_loss_pct REAL DEFAULT 7.0,
-            target_profit_pct REAL DEFAULT 15.0,
+            target_profit_pct REAL DEFAULT 14.0,
             sell_ratio REAL DEFAULT 50.0,
             status TEXT DEFAULT '持有'
         )
@@ -41,10 +41,10 @@ def init_db():
     # 動態補足欄位 (防呆升級)
     cursor.execute("PRAGMA table_info(stock_master)")
     existing_cols = [info[1] for info in cursor.fetchall()]
-    for col, dtype in [('period', 'TEXT DEFAULT \'中期波段\''), 
-                       ('strategy_type', 'TEXT DEFAULT \'2倍風險停利法\''),
+    for col, dtype in [('period', "TEXT DEFAULT '中期波段'"), 
+                       ('strategy_type', "TEXT DEFAULT '2倍風險停利法'"),
                        ('stop_loss_pct', 'REAL DEFAULT 7.0'),
-                       ('target_profit_pct', 'REAL DEFAULT 15.0'),
+                       ('target_profit_pct', 'REAL DEFAULT 14.0'),
                        ('sell_ratio', 'REAL DEFAULT 50.0')]:
         if col not in existing_cols:
             cursor.execute(f"ALTER TABLE stock_master ADD COLUMN {col} {dtype}")
@@ -184,7 +184,6 @@ def parse_uploaded_csv(uploaded_file):
 st.set_page_config(page_title="策略紀律筆記本", layout="centered")
 st.title("📱 投資決策紀律筆記本")
 
-# 🎯 正式拉出四大頁籤
 tab1, tab2, tab3, tab4 = st.tabs(["📊 今日總覽", "🔍 個股時序", "📅 月覆盤", "💡 馬克心法"])
 
 if "yahoo_prices" not in st.session_state: st.session_state.yahoo_prices = {}
@@ -253,10 +252,7 @@ with tab1:
             cursor = conn.cursor()
             for _, row in df_parsed.iterrows():
                 cursor.execute("UPDATE stock_master SET status='已結案' WHERE stock_id=? AND status='持有'", (row['stock_id'],))
-                cursor.execute("""
-                    INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
-                    VALUES (?, '已實現出場', ?, ?, ?, ?)
-                """, (row['stock_id'], row['op_date'], row['avg_cost'], row['shares'], f"已實現CSV自動導入，結案損益：{row['realized_pnl']}"))
+                cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '已實現出場', ?, ?, ?, ?)", (row['stock_id'], row['op_date'], row['avg_cost'], row['shares'], f"已實現CSV自動導入，結案損益：{row['realized_pnl']}"))
             conn.commit()
             conn.close()
             st.success("🎉 已實現數據同步完畢！")
@@ -279,10 +275,9 @@ with tab1:
                         events.append({'type': ev_type, 'data': row, 'old_shares': old_item['shares'], 'old_cost': old_item['avg_cost']})
             st.session_state.csv_events = events
 
-    # 📥 【CSV 匯入互動確認匣】 (補齊標籤與紀律設定)
+    # 📥 【CSV 匯入互動確認匣】 (策略連動自動帶入)
     if st.session_state.csv_events:
         st.warning(f"⚠️ 偵測到 {len(st.session_state.csv_events)} 筆庫存異動事件！請配置您的交易紀律：")
-        
         events_to_process = list(st.session_state.csv_events)
         
         for idx, ev in enumerate(events_to_process):
@@ -292,8 +287,19 @@ with tab1:
                 st.write(f"• 異動新股數：{row['shares']:,} 股 | 均價成本：${row['avg_cost']}")
                 
                 csv_period = st.radio("🏷️ 1. 投資週期分類：", ["長期投資", "中期波段", "短期操作"], index=1, key=f"csv_per_{idx}", horizontal=True)
+                
+                # 🎯 馬克策略動態連動配置表單
                 csv_strat = st.radio("⚙️ 2. 馬克紀律策略：", ["2倍風險停利法", "強勢波段停利法"], key=f"csv_str_{idx}", horizontal=True)
                 csv_sl = st.number_input("🛡️ 3. 初始停損點 (%)：", value=7.0, step=0.5, key=f"csv_sl_{idx}")
+                
+                if csv_strat == "2倍風險停利法":
+                    csv_tp = csv_sl * 2
+                    csv_ratio = 50.0
+                    st.markdown(f"💡 **馬克策略連動帶入**：獲利目標自動鎖定 **{csv_tp:.1f}%**，達標時強制落袋 **50.0%** 持股。")
+                else:
+                    csv_tp = st.number_input("🎯 自訂目標漲幅 (%)：", value=20.0, step=1.0, key=f"csv_tp_{idx}")
+                    csv_ratio = st.number_input("🛒 觸發出場持股比例 (%)：", value=33.33, step=5.0, key=f"csv_ratio_{idx}")
+                    
                 op_date = st.date_input("📅 4. 操作日期選單：", value=datetime.today(), key=f"csv_date_{idx}")
                 
                 st.caption("⚡ 5. 快速套用操作理由模板：")
@@ -309,35 +315,26 @@ with tab1:
                             st.session_state[note_key] = t_text
                             st.rerun()
                             
-                note_text = st.text_area("📝 6. 詳細操作理由備忘錄：", value=st.session_state[note_key], key=note_key)
+                note_text = st.text_area("📝 6. 詳細操作理由備忘錄：", value=st.session_state[note_key], key=f"csv_txt_{idx}")
                 
                 if st.button("💾 確認寫入庫存與歷史帳", key=f"csv_save_btn_{idx}", type="primary"):
                     conn = sqlite3.connect(DB_NAME)
                     cursor = conn.cursor()
                     if ev['type'] == '初始建倉':
-                        cursor.execute("""
-                            INSERT INTO stock_master (market, stock_id, stock_name, avg_cost, shares, core_reason, period, strategy_type, stop_loss_pct)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (row['market'], sid, row['stock_name'], row['avg_cost'], row['shares'], note_text, csv_period, csv_strat, csv_sl))
+                        cursor.execute("INSERT INTO stock_master (market, stock_id, stock_name, avg_cost, shares, core_reason, period, strategy_type, stop_loss_pct, target_profit_pct, sell_ratio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (row['market'], sid, row['stock_name'], row['avg_cost'], row['shares'], note_text, csv_period, csv_strat, csv_sl, csv_tp, csv_ratio))
                         shares_diff = row['shares']
                     else:
-                        cursor.execute("""
-                            UPDATE stock_master SET avg_cost=?, shares=?, period=?, strategy_type=?, stop_loss_pct=? 
-                            WHERE stock_id=? AND status='持有'
-                        """, (row['avg_cost'], row['shares'], csv_period, csv_strat, csv_sl, sid))
+                        cursor.execute("UPDATE stock_master SET avg_cost=?, shares=?, period=?, strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=? WHERE stock_id=? AND status='持有'", (row['avg_cost'], row['shares'], csv_period, csv_strat, csv_sl, csv_tp, csv_ratio, sid))
                         shares_diff = abs(row['shares'] - ev['old_shares'])
                         
-                    cursor.execute("""
-                        INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (sid, ev['type'], op_date.strftime("%Y-%m-%d"), row['avg_cost'], shares_diff, note_text))
+                    cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, ?, ?, ?, ?, ?)", (sid, ev['type'], op_date.strftime("%Y-%m-%d"), row['avg_cost'], shares_diff, note_text))
                     conn.commit()
                     conn.close()
                     st.session_state.csv_events = [e for i, e in enumerate(st.session_state.csv_events) if i != idx]
                     st.success("已成功同步寫入資料庫！")
                     st.rerun()
 
-    # 手動建立新庫存
+    # 手動建立新庫存 (連動帶入機制)
     with st.expander("➕ 手動新增全新個股庫存項目"):
         m_market = st.selectbox("市場", ["台股", "美股"])
         m_id = st.text_input("股票代號 (如: 00922.TW / NVDA)")
@@ -345,27 +342,31 @@ with tab1:
         m_cost = st.number_input("平均成本均價", min_value=0.0, step=0.1)
         m_shares = st.number_input("持有股數", min_value=0.0, step=1.0)
         m_period = st.selectbox("投資週期分類", ["長期投資", "中期波段", "短期操作"], index=1)
+        
         m_strat = st.selectbox("馬克策略", ["2倍風險停利法", "強勢波段停利法"])
         m_sl = st.number_input("初始停損 (%)", value=7.0, step=0.5)
+        
+        if m_strat == "2倍風險停利法":
+            m_tp = m_sl * 2
+            m_ratio = 50.0
+            st.caption(f"💡 系統已自動對應鎖定：目標獲利 {m_tp:.1f}% / 出場比例 50%")
+        else:
+            m_tp = st.number_input("自訂目標漲幅 (%)", value=20.0, step=1.0)
+            m_ratio = st.number_input("自訂出場持股比例 (%)", value=33.33, step=5.0)
+            
         m_reason = st.text_area("核心建倉理由")
         if st.button("🚀 確認手動建立新股", type="primary", use_container_width=True):
             if m_id and m_name:
                 conn = sqlite3.connect(DB_NAME)
                 cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO stock_master (market, stock_id, stock_name, avg_cost, shares, core_reason, period, strategy_type, stop_loss_pct)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (m_market, m_id, m_name, m_cost, m_shares, m_reason, m_period, m_strat, m_sl))
-                cursor.execute("""
-                    INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
-                    VALUES (?, '初始建倉', ?, ?, ?, ?)
-                """, (m_id, datetime.today().strftime("%Y-%m-%d"), m_cost, m_shares, m_reason))
+                cursor.execute("INSERT INTO stock_master (market, stock_id, stock_name, avg_cost, shares, core_reason, period, strategy_type, stop_loss_pct, target_profit_pct, sell_ratio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (m_market, m_id, m_name, m_cost, m_shares, m_reason, m_period, m_strat, m_sl, m_tp, m_ratio))
+                cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '初始建倉', ?, ?, ?, ?)", (m_id, datetime.today().strftime("%Y-%m-%d"), m_cost, m_shares, m_reason))
                 conn.commit()
                 conn.close()
                 st.success("手動標的建立成功！")
                 st.rerun()
 
-    # ─── 大腦運算：動態雙向排序置頂計算 ───
+    # ─── 大腦運算：雙向警示置頂洗牌排序 ───
     conn = sqlite3.connect(DB_NAME)
     df_db = pd.read_sql_query("SELECT * FROM stock_master WHERE status='持有'", conn)
     conn.close()
@@ -386,7 +387,6 @@ with tab1:
                 current_value = y_price * row['shares']
                 pnl_money = (y_price - row['avg_cost']) * row['shares']
                 
-                # 嚴格區分長中短期，長期徹底豁免
                 if row['period'] != '長期投資':
                     if profit_pct <= -row['stop_loss_pct']:
                         alert_status = "stop_loss"
@@ -395,19 +395,14 @@ with tab1:
                         if profit_pct >= target_pct:
                             alert_status = "take_profit"
             
-            # 強制置頂權重
             sort_weight = 0 if alert_status == "stop_loss" else (1 if alert_status == "take_profit" else 2)
-            
             processed_stocks.append({
                 'row': row, 'y_price': y_price, 'profit_pct': profit_pct,
                 'current_value': current_value, 'pnl_money': pnl_money,
                 'alert_status': alert_status, 'sort_weight': sort_weight
             })
-            
-        # 依據權重進行排序洗牌
         processed_stocks.sort(key=lambda x: x['sort_weight'])
 
-    # 區塊 3：核心看板渲染
     st.markdown("---")
     col_title, col_refresh = st.columns([2, 1])
     with col_title: st.subheader("🟢 當前持有庫存總覽")
@@ -432,41 +427,36 @@ with tab1:
             y_price = item['y_price']
             profit_pct = item['profit_pct']
             
-            # 🎯 計算馬克常態指引數值
+            # 🎯 提取與常態化動態參數
             stop_loss_price = round(stock['avg_cost'] * (1 - (stock['stop_loss_pct'] / 100)), 2)
-            if stock['strategy_type'] == '2倍風險停利法':
-                target_pct_val = stock['stop_loss_pct'] * 2
-                ratio_val = 50.0
-            else:
-                target_pct_val = stock['target_profit_pct']
-                ratio_val = stock['sell_ratio']
+            target_pct_val = stock['stop_loss_pct'] * 2 if stock['strategy_type'] == '2倍風險停利法' else stock['target_profit_pct']
+            ratio_val = stock['sell_ratio']
             
             take_profit_price = round(stock['avg_cost'] * (1 + (target_pct_val / 100)), 2)
             suggested_shares = round(stock['shares'] * (ratio_val / 100))
             expected_cash = round(suggested_shares * (take_profit_price), 1)
 
-            # 🛑 絕對靠左對齊，防禦 Markdown 程式碼區塊解析錯誤
+            # 🛑 核心修復：除掉所有字串內空格與排版縮進，防止 Markdown 錯判為 Code Block 
             if item['alert_status'] == "stop_loss":
-                st.markdown(f"""<div style="background-color: #ffebee; border-left: 8px solid #c62828; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #b71c1c;">
-<b style="font-size: 1.15rem;">🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
+                st.markdown(f'''<div style="background-color: #ffebee; border-left: 8px solid #c62828; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #b71c1c;">
+<b>🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
 <b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
 核心警示：目前即時損益已跌達 <span style="font-weight:bold; font-size:1.1rem;">{profit_pct:.2f}%</span>，觸及防守門檻 (-{stock['stop_loss_pct']:.1f}%)。<br>
 請立即開啟券商交易軟體，理性手起刀落執行全數停損，嚴控風險本金！
-</div>""", unsafe_allow_html=True)
-
+</div>''', unsafe_allow_html=True)
             elif item['alert_status'] == "take_profit":
                 expected_actual_cash = round(suggested_shares * (y_price if y_price else 0), 1)
-                st.markdown(f"""<div style="background-color: #ffe0b2; border-left: 8px solid #f57c00; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #5d4037;">
-<b style="font-size: 1.15rem;">🔥 🚨 超級績效：已達馬克分批獲利停利點！</b><br>
+                st.markdown(f'''<div style="background-color: #ffe0b2; border-left: 8px solid #f57c00; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #5d4037;">
+<b>🔥 🚨 超級績效：已達馬克分批獲利停利點！</b><br>
 <b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
 ==========================================================<br>
 💰 當 前 獲 利 ％ ： <span style="color:#d84315; font-weight:bold;">+{profit_pct:.2f}%</span> (目標: +{target_pct_val:.1f}%)<br>
 🚪 門 檻 出 場 ％ ： 強制落袋 {ratio_val}% 庫存持股<br>
 🛒 應 下 單 股 數 ： <b>請至券商下單賣出 【 {suggested_shares:,} 】 股</b><br>
-💵 預計收回總金額 ： <b>${expected_actual_cash:,}</b><br>
+💵 預計收回總金額 ： <b>${expected_actual_cash:,} 元</b><br>
 ==========================================================<br>
 <small>💡 續抱指引：減碼後，系統會自動將賸餘部位的防守點移至保本價 ${stock['avg_cost']}。</small>
-</div>""", unsafe_allow_html=True)
+</div>''', unsafe_allow_html=True)
 
                 confirm_key = f"chk_action_{db_id}"
                 if st.checkbox("🧾 我已在券商完成此筆減碼下單 (勾選展開實際成交微調)", key=confirm_key):
@@ -485,10 +475,7 @@ with tab1:
                             else:
                                 cursor.execute("UPDATE stock_master SET shares=? WHERE id=?", (new_shares, db_id))
                             note_msg = f"觸發馬克【{stock['strategy_type']}】，自動換算減碼。當前獲利 +{profit_pct:.2f}%，實際賣出 {actual_shares} 股，收回金額：${round(actual_shares*actual_price, 2)}"
-                            cursor.execute("""
-                                INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
-                                VALUES (?, '減碼', ?, ?, ?, ?)
-                            """, (sid, actual_date.strftime("%Y-%m-%d"), actual_price, actual_shares, note_msg))
+                            cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '減碼', ?, ?, ?, ?)", (sid, actual_date.strftime("%Y-%m-%d"), actual_price, actual_shares, note_msg))
                             conn.commit()
                             conn.close()
                             st.success("紀錄已成功同步歸檔！")
@@ -498,37 +485,37 @@ with tab1:
             border_line = "6px solid #1e88e5" if stock['period'] == '長期投資' else "6px solid #757575"
             text_main_color = "#0d47a1" if stock['period'] == '長期投資' else "#333333"
             
-            # 🛑 絕對靠左對齊，徹底消滅 Markdown 代碼區塊誤判
+            # 🛑 核心修復：剔除所有字串開頭縮進，將數據高亮封裝進質感淺灰色方塊
             if y_price:
                 pnl_color = "#d32f2f" if item['pnl_money'] < 0 else "#388e3c"
                 pnl_arrow = "🔴" if item['pnl_money'] < 0 else "🟢"
                 
                 mark_guide_html = ""
                 if stock['period'] != '長期投資':
-                    mark_guide_html = f"""<hr style="border-top: 1px solid #e0e0e0; margin: 8px 0;">
+                    mark_guide_html = f'''<hr style="border-top: 1px solid #e0e0e0; margin: 8px 0;">
 <b>📜 馬克紀律常態操盤指引 (動態換算)：</b><br>
-⚙️ 執行策略：【{stock['strategy_type']}】<br>
+• ⚙️ 執行策略：【{stock['strategy_type']}】<br>
 • 🛑 嚴格停損線 (-{stock['stop_loss_pct']}%): <b>${stop_loss_price}</b> (破此價強制全清倉 {stock['shares']} 股)<br>
-• 🎯 分批停利點 (+{target_pct_val}%): <b>${take_profit_price}</b> (達此價強制落袋減碼 {suggested_shares} 股，預計收回 ${expected_cash})"""
+• 🎯 分批停利點 (+{target_pct_val}%): <b>${take_profit_price}</b> (達此價強制落袋減碼 {suggested_shares} 股，預計收回 ${expected_cash})'''
 
-                stats_block = f"""<div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #424242;">
+                stats_block = f'''<div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #424242;">
 🏢 最新市價：<b>{y_price}</b> &nbsp;|&nbsp; 當前現值：<b>${item['current_value']:,.1f}</b><br>
 即時損益：<span style="color:{pnl_color}; font-weight:bold;">{pnl_arrow} {profit_pct:.2f}%</span> &nbsp;|&nbsp; 帳面獲利提示：<span style="color:{pnl_color}; font-weight:bold;">${item['pnl_money']:,.1f}</span>
 {mark_guide_html}
-</div>"""
+</div>'''
             else:
-                stats_block = """<div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #757575; font-style: italic;">
+                stats_block = '''<div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #757575; font-style: italic;">
 ⚪ 帳產現值未經刷新，請點選右上角按鈕動態連動 Yahoo 股市。
-</div>"""
+</div>'''
                 
-            st.markdown(f"""<div style="background-color: {bg_color}; border: 1px solid #e0e0e0; border-left: {border_line}; padding: 14px; border-radius: 6px; color: {text_main_color};">
+            st.markdown(f'''<div style="background-color: {bg_color}; border: 1px solid #e0e0e0; border-left: {border_line}; padding: 14px; border-radius: 6px; color: {text_main_color};">
 <b style="font-size:1.1rem;">{'💠' if stock['period']=='長期投資' else '🛡️'} 【{stock['market']}】{sid} {stock['stock_name']}</b> ({stock['period']})<br>
 庫存均價：<b>${stock['avg_cost']}</b> &nbsp;|&nbsp; 持有股數：<b>{stock['shares']:,} 股</b>
 {stats_block}
 <small>📌 核心理由：{stock['core_reason']}</small>
-</div>""", unsafe_allow_html=True)
+</div>''', unsafe_allow_html=True)
 
-            # 三大控制核心按鈕 (綁定絕對唯一的 db_id)
+            # 三大控制核心按鈕
             c1, c2, c3 = st.columns([2, 2, 1])
             with c1:
                 if st.button("加/減碼", key=f"op_btn_{db_id}", use_container_width=True):
@@ -545,15 +532,12 @@ with tab1:
                     conn = sqlite3.connect(DB_NAME)
                     cursor = conn.cursor()
                     cursor.execute("UPDATE stock_master SET status='已結案' WHERE id=?", (db_id,))
-                    cursor.execute("""
-                        INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
-                        VALUES (?, '手動結案', ?, ?, ?, '手動清倉移出')
-                    """, (sid, datetime.today().strftime("%Y-%m-%d"), stock['avg_cost'], stock['shares']))
+                    cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '手動結案', ?, ?, ?, '手動清倉移出')", (sid, datetime.today().strftime("%Y-%m-%d"), stock['avg_cost'], stock['shares']))
                     conn.commit()
                     conn.close()
                     st.rerun()
 
-            # 🛠️ 控制匣一：快速「加/減碼」面板
+            # 控制匣一：快速「加/減碼」面板 (動態加權運算)
             if st.session_state.op_mode.get(db_id, False):
                 with st.container(border=True):
                     st.caption("➕ 盤中快速【加/減碼】交易變動換算：")
@@ -594,10 +578,7 @@ with tab1:
                                 else:
                                     cursor.execute("UPDATE stock_master SET shares=? WHERE id=?", (new_shares, db_id))
                                     
-                            cursor.execute("""
-                                INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                            """, (sid, tx_type, tx_date.strftime("%Y-%m-%d"), tx_price, tx_shares, tx_note))
+                            cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, ?, ?, ?, ?, ?)", (sid, tx_type, tx_date.strftime("%Y-%m-%d"), tx_price, tx_shares, tx_note))
                             conn.commit()
                             conn.close()
                             st.session_state.op_mode[db_id] = False
@@ -605,7 +586,7 @@ with tab1:
                             st.success("交易換算並寫入完畢！")
                             st.rerun()
 
-            # 🛠️ 控制匣二：快速「細節修復編輯」面板
+            # 控制匣二：快速「細節修復編輯」面板 (動態表單連動)
             if st.session_state.edit_mode.get(db_id, False):
                 with st.container(border=True):
                     st.caption(f"🔧 修正【{sid}】庫存原始設定：")
@@ -614,22 +595,25 @@ with tab1:
                     u_cost = st.number_input("平均成本", value=float(stock['avg_cost']), step=0.01, key=f"u_cost_{db_id}")
                     u_shares = st.number_input("目前股數", value=float(stock['shares']), step=1.0, key=f"u_shares_{db_id}")
                     u_period = st.selectbox("投資週期分類", ["長期投資", "中期波段", "短期操作"], index=["長期投資", "中期波段", "短期操作"].index(stock['period']), key=f"u_per_{db_id}")
+                    
+                    # 🎯 編輯介面也完成馬克策略參數自動連動
                     u_strat = st.selectbox("減碼紀律策略", ["2倍風險停利法", "強勢波段停利法"], index=["2倍風險停利法", "強勢波段停利法"].index(stock['strategy_type']), key=f"u_str_{db_id}")
-                    cc1, cc2 = st.columns(2)
-                    with cc1: u_sl = st.number_input("初始停損點 (%)", value=float(stock['stop_loss_pct']), step=0.1, key=f"u_sl_{db_id}")
-                    with cc2: u_tp = st.number_input("自訂目標漲幅 (%)", value=float(stock['target_profit_pct']), step=0.1, key=f"u_tp_{db_id}")
-                    u_ratio = st.number_input("波段觸發出場持股比例 (%)", value=float(stock['sell_ratio']), step=5.0, key=f"u_rat_{db_id}")
+                    u_sl = st.number_input("初始停損點 (%)", value=float(stock['stop_loss_pct']), step=0.1, key=f"u_sl_{db_id}")
+                    
+                    if u_strat == "2倍風險停利法":
+                        u_tp = u_sl * 2
+                        u_ratio = 50.0
+                        st.caption(f"💡 策略連動帶入：目標獲利將強制鎖定為 {u_tp:.1f}% / 減碼比例 50%")
+                    else:
+                        u_tp = st.number_input("自訂目標漲幅 (%)", value=float(stock['target_profit_pct']), step=0.1, key=f"u_tp_{db_id}")
+                        u_ratio = st.number_input("波段觸發出場持股比例 (%)", value=float(stock['sell_ratio']), step=5.0, key=f"u_rat_{db_id}")
+                        
                     u_reason = st.text_area("核心理由", value=stock['core_reason'], key=f"u_rea_{db_id}")
                     
                     if st.button("💾 儲存個股修正", key=f"save_edit_{db_id}", type="primary", use_container_width=True):
                         conn = sqlite3.connect(DB_NAME)
                         cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE stock_master SET 
-                                stock_id=?, stock_name=?, avg_cost=?, shares=?, period=?, 
-                                strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=?, core_reason=?
-                            WHERE id=?
-                        """, (u_id, u_name, u_cost, u_shares, u_period, u_strat, u_sl, u_tp, u_ratio, u_reason, db_id))
+                        cursor.execute("UPDATE stock_master SET stock_id=?, stock_name=?, avg_cost=?, shares=?, period=?, strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=?, core_reason=? WHERE id=?", (u_id, u_name, u_cost, u_shares, u_period, u_strat, u_sl, u_tp, u_ratio, u_reason, db_id))
                         conn.commit()
                         conn.close()
                         st.session_state.edit_mode[db_id] = False
@@ -703,44 +687,66 @@ with tab3:
             st.success(f"{selected_ym} 心態日誌已妥善存檔！")
 
 # ==========================================
-# 分頁四：馬克心法交易新法 (終極續抱指南)
+# 分頁四：馬克心法交易新法 (終極擴充名言交織版)
 # ==========================================
 with tab4:
-    st.markdown("""
-    ## 💡 馬克·米奈爾維尼 (Mark Minervini) 超級績效操盤心法
+    st.markdown('''
+## 💡 馬克·米奈爾維尼 (Mark Minervini) 超級績效大師心法
 
-    ---
-    ### 🎯 一、 風險優先與期望值防禦 (操盤手的護城河)
-    * **🛡️ 本金保護盾**
-      > 「先想著怎麼輸，才會知道怎麼贏。永遠在進場前決定停損，並保護你的本金。」
-      進場前沒算好停損％，絕對不按下單鈕。賠掉 7%，需賺 7.5% 回本；但賠掉 50%，必須賺 100% 才能翻身。
-    * **💰 利潤鎖定（2倍風險停利法）**
-      當股價觸及初始停損的 2 倍（如停損設 -7%，漲到 +14%）時，**強制無條件賣出 50% 的部位**。不是為了賣最高，而是穩固 2:1 的賺賠比。
+---
+### 🎯 一、 風險優先思維與期望值防禦 (操盤手的生命線)
+* **💥 虧損控制的鐵律**
+  > *「如果你不能忍受小虧損，遲早會面臨所有虧損之母。」*
+  > *「輸家才會攤平輸家 (Losers average losers)！在錯誤的標的上攤平，只是在為你的傲慢支付雙倍罰款。」*
+  
+  馬克強調，進場前如果沒有算好停損點，就絕對不按下單鈕。本金防禦大於一切，一檔股票讓你賠掉 7%，你只需要賺 7.5% 就能回本；但如果放任虧損砍半跌掉 50%，你必須賺 100% 才能翻身。
+  
+* **📊 賺賠比與期望值方程式**
+  > *「交易的秘密在於賺大賠小，而不是每次操作都對。只要賺賠比拉高，即使勝率只有 30%，你依然能成為富翁。」*
+  
+  市場上多數人著迷於尋找百分之百獲勝的聖盃，但真正的贏家用數學公式思考。讓你的每一筆虧損鎖定在可控小範圍，而讓獲利部位擁有兩倍以上的期望空間，資產才能真正實現滾動複利。
 
-    ---
-    ### 🛡️ 二、 核心焦點：前半段停利後，剩下 50% 怎麼「續抱」？
-    留下的一半持股，目標是去咬住「一季或半年翻倍的超級大行情」，盤中請啟動以下 **3 大中線續抱鐵律**：
+---
+### 💰 二、 經典策略：2倍風險停利法 (不敗的數學防禦)
+* **🔒 獲利的一半強制落袋**
+  > *「絕不讓一筆已經大賺的利潤，演變成虧損出場。當市場已經給你兩倍風險的利賞，拿走它，落袋為安。」*
+  
+  當股價順利觸及你當初設定初始停損點的 2 倍（例如停損設 -7%，即時獲利來到 +14%）時，必須毫無懸念、開除情緒，**強制在強勢中賣出 50%（一半）的部位持股**。
+  
+* **🛡️ 賸餘部位移至保本點防守**
+  賣出一半鎖定利潤後，最重要的關鍵下個動作：**立刻將剩下的 50% 持股防守停損線，往上移到你的「買入成本價」**。
+  這樣做在數學上這筆單已經立於不敗之地。最壞的情況就是股票回頭，剩下的持股在成本平手出場，但扣除前面大賺的 14%，你整筆交易最終依然穩賺 7%。
 
-    1. **移至保本點防守（絕對不敗）**
-       一旦前半段利潤落袋，**剩下的持股停損點必須立刻上移至「買入成本價」**。最壞的打算就是平手出場，但整筆交易最終依然穩賺前半段利潤。
-    2. **移動均線動態續抱（跟隨法人生命線）**
-       * **🚀 加速噴發期**：參考 **20EMA（月線）**。只要每日收盤價沒有無情跌破 20EMA，中途震盪皆視為噪音，死抱到底。
-       * **🧱 平台橫盤期**：參考 **50MA（季線）**。強勢股拉回 50MA 是法人大戶逢低進場點。只要週K線收盤未破 50MA，安心續抱，給標的呼吸空間。
-    3. **階梯平台移動停損法 (Backing and Filling)**
-       強勢股上漲如走樓梯。當股價成功建立新的橫盤平台（Base 2）並再度向上突破創新高時，將剩下持股的防守點，從成本價**逐層上移到新平台的最低點**，像坐電梯一樣鎖住利潤。
+---
+### 🚀 三、 終極策略：強勢波段停利法 (Selling into Strength)
+* **🛒 把股票優雅地倒給瘋狂追高的大眾**
+  > *「要在強勢中賣出！不要等趨勢無情反轉、跌勢轟然啟動時，才驚慌失措地與全市場一起踩踏逃竄。」*
+  
+  真正的超級飆股在大多頭市場中，往往會在極短時間內（1 到 3 週）出現無回檔的垂直噴發。這通常是散戶集體發瘋、主力倒貨的「最後高潮（Climax Run）」。此時絕不能等跌破均線，必須主動減碼 1/3 或 1/2。
+  
+* **⚡ 觸及強勢波段停利的 4 大趕頂訊號：**
+  1. **波段首波達標 (Base Hit)**：從一個健康的型態（如 VCP）帶量平台突破後，快速上漲 15% ~ 25%。這通常是第一波多頭動能的極限，隨後必有首波拉回修正。
+  2. **均線乖離率過大 (Extension)**：股價拋離 20日均線（月線）超過 15%~20%，或拋離 50日均線（季線）超過 30%~50%，就像橡皮筋拉到極限，隨時面臨猛烈回彈。
+  3. **趕頂垂直噴發 (Climax Run)**：股價連續上漲數月後，突然在尾段出現角度高達 75 度以上的噴發，連續 10 天中有 8 天暴漲，且爆出歷史天量。
+  4. **竭盡缺口與單日最大價差**：長途跋涉後出現巨幅跳空缺口，或出現起漲以來「單日實體K棒最長、漲幅最大」的一天，代表動能耗竭。
+  
+* **🪜 減碼後剩下的持股，該如何詳細續抱？**
+  * **移至保本價**：第一時間將剩下的停損點移到買入成本價，鎖死底線。
+  * **20EMA（月線）追蹤加速期**：若屬於極強勢飆股，只要每日收盤價沒有跌破 20EMA，其餘震盪一律視為噪音，死抱到底。
+  * **50MA（季線）防守整理期**：當飆股漲了 30%~50% 開始橫盤築第二個平台時，股價會拉回季線。只要週K線收盤未破 50MA，代表法人機構在逢低加碼，賸餘部位安心續抱。
+  * **階梯平台移動停損 (Backing and Filling)**：每當股價成功站上新平台創高，將防守價逐層上移到新平台的最低點，像電梯一樣鎖死獲利。
 
-    ---
-    ### 🚨 三、 剩下的 50% 部位，何時該「全數清倉結案」？
-    出現以下兩大離場訊號，代表多頭大勢已去，必須手起刀落全面結案：
+---
+### 🚨 四、 法人撤資與全面清倉結案訊號
+* **💥 當大勢已去，手起刀落全面離場**
+  > *「操盤手不與股票談戀愛。當大戶的腳步已經撤離，你必須比他們跑得更快。」*
+  
+  當出現以下情況，剩下的一半持股必須全數清倉、結束戰局：股價高檔爆量跌破 50MA（季線），且隨後幾天反彈皆無力站回。這意味著主力資金正式出清，大趨勢已經終結，絕不留戀。
 
-    1. **💥 訊號 1：主力撤資（無情破位季線）**
-       當股價高檔爆量跌破 50MA，且隨後幾天反彈皆顯著站不回 50MA，代表大戶出貨完畢，立刻清倉。
-    2. **🌋 訊號 2：高潮噴出（趕頂煙火 Climax Run）**
-       股票大漲半年後，突然在 1~3 週內出現 **70-80 度的垂直暴漲**，且**成交量爆出歷史天量**、媒體集體瘋狂吹捧。這是主力反向倒貨給散戶的最後煙火。
-       > **動作**：不要等跌破均線，直接在最狂熱的一兩天內**「賣在強勢中」**，全面獲利了結。
-
-    ---
-    ### 📈 四、 技術型態：VCP 波幅收窄型態
-    * **尋找臨界點 (Pivot Point)**
-      飆股噴發前，每次拉回的幅度會越來越小（如：第一次拉回 30%、第二次 15%、第三次 6%），成交量在右側極度萎縮，代表籌碼鎖定。此時只要一根**帶量突破臨界點**的紅K，就是完美的建倉時機。
-    """)
+---
+### 📈 五、 技術型態：VCP 波幅收窄型態 (籌碼的精準解讀)
+* **🔍 尋找市場的臨界點 (Pivot Point)**
+  > *「我尋找的不是便宜的低價股票，而是準備好要瘋狂飆漲的股票。」*
+  
+  飆股噴發前，籌碼會從散戶（軟手）轉移到主力大戶（強手）手中。在型態上會表現出每次拉回修正的幅度越來越小（如：30% ➔ 15% ➔ 7% ➔ 3%），且在最右側成交量極度萎縮窒息，代表市場上想賣的人都賣光了。此時只要出現一根**帶量突破臨界點（Pivot）**的長紅K，就是最完美的初始建倉一擊。
+''')
