@@ -71,6 +71,14 @@ def init_db():
             yahoo_id TEXT
         )
     ''')
+
+    # 新增：月度覆盤真實存檔表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS monthly_reviews (
+            ym TEXT PRIMARY KEY,
+            review_text TEXT
+        )
+    ''')
     
     cursor.execute("SELECT COUNT(*) FROM stock_mapping")
     if cursor.fetchone()[0] == 0:
@@ -199,12 +207,14 @@ with st.sidebar:
         df_m = pd.read_sql_query("SELECT * FROM stock_master", conn)
         df_t = pd.read_sql_query("SELECT * FROM stock_timeline", conn)
         df_map = pd.read_sql_query("SELECT * FROM stock_mapping", conn)
+        df_rev = pd.read_sql_query("SELECT * FROM monthly_reviews", conn)
         conn.close()
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_m.to_excel(writer, sheet_name='Master', index=False)
             df_t.to_excel(writer, sheet_name='Timeline', index=False)
             df_map.to_excel(writer, sheet_name='Mapping', index=False)
+            df_rev.to_excel(writer, sheet_name='Reviews', index=False)
         st.download_button(
             label="💾 點擊下載備份檔", data=output.getvalue(),
             file_name=f"stock_backup_{datetime.today().strftime('%Y%m%d')}.xlsx",
@@ -216,7 +226,7 @@ with st.sidebar:
         try:
             excel_data = pd.read_excel(restore_file, sheet_name=None)
             conn = sqlite3.connect(DB_NAME)
-            for sheet, table in [('Master', 'stock_master'), ('Timeline', 'stock_timeline'), ('Mapping', 'stock_mapping')]:
+            for sheet, table in [('Master', 'stock_master'), ('Timeline', 'stock_timeline'), ('Mapping', 'stock_mapping'), ('Reviews', 'monthly_reviews')]:
                 if sheet in excel_data: excel_data[sheet].to_sql(table, conn, if_exists='replace', index=False)
             conn.commit()
             conn.close()
@@ -275,7 +285,7 @@ with tab1:
                         events.append({'type': ev_type, 'data': row, 'old_shares': old_item['shares'], 'old_cost': old_item['avg_cost']})
             st.session_state.csv_events = events
 
-    # 📥 【CSV 匯入互動確認匣】 (策略連動自動帶入)
+    # 📥 【CSV 匯入互動確認匣】
     if st.session_state.csv_events:
         st.warning(f"⚠️ 偵測到 {len(st.session_state.csv_events)} 筆庫存異動事件！請配置您的交易紀律：")
         events_to_process = list(st.session_state.csv_events)
@@ -287,8 +297,6 @@ with tab1:
                 st.write(f"• 異動新股數：{row['shares']:,} 股 | 均價成本：${row['avg_cost']}")
                 
                 csv_period = st.radio("🏷️ 1. 投資週期分類：", ["長期投資", "中期波段", "短期操作"], index=1, key=f"csv_per_{idx}", horizontal=True)
-                
-                # 🎯 馬克策略動態連動配置表單
                 csv_strat = st.radio("⚙️ 2. 馬克紀律策略：", ["2倍風險停利法", "強勢波段停利法"], key=f"csv_str_{idx}", horizontal=True)
                 csv_sl = st.number_input("🛡️ 3. 初始停損點 (%)：", value=7.0, step=0.5, key=f"csv_sl_{idx}")
                 
@@ -331,10 +339,11 @@ with tab1:
                     conn.commit()
                     conn.close()
                     st.session_state.csv_events = [e for i, e in enumerate(st.session_state.csv_events) if i != idx]
+                    if note_key in st.session_state: del st.session_state[note_key]
                     st.success("已成功同步寫入資料庫！")
                     st.rerun()
 
-    # 手動建立新庫存 (連動帶入機制)
+    # 手動建立新庫存
     with st.expander("➕ 手動新增全新個股庫存項目"):
         m_market = st.selectbox("市場", ["台股", "美股"])
         m_id = st.text_input("股票代號 (如: 00922.TW / NVDA)")
@@ -436,7 +445,7 @@ with tab1:
             suggested_shares = round(stock['shares'] * (ratio_val / 100))
             expected_cash = round(suggested_shares * (take_profit_price), 1)
 
-            # 🛑 核心修復：除掉所有字串內空格與排版縮進，防止 Markdown 錯判為 Code Block 
+            # 🛑 大紅置頂
             if item['alert_status'] == "stop_loss":
                 st.markdown(f'''<div style="background-color: #ffebee; border-left: 8px solid #c62828; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #b71c1c;">
 <b>🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
@@ -478,6 +487,9 @@ with tab1:
                             cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '減碼', ?, ?, ?, ?)", (sid, actual_date.strftime("%Y-%m-%d"), actual_price, actual_shares, note_msg))
                             conn.commit()
                             conn.close()
+                            
+                            # 安全釋放狀態，防 Crash
+                            if confirm_key in st.session_state: del st.session_state[confirm_key]
                             st.success("紀錄已成功同步歸檔！")
                             st.rerun()
 
@@ -485,7 +497,7 @@ with tab1:
             border_line = "6px solid #1e88e5" if stock['period'] == '長期投資' else "6px solid #757575"
             text_main_color = "#0d47a1" if stock['period'] == '長期投資' else "#333333"
             
-            # 🛑 核心修復：剔除所有字串開頭縮進，將數據高亮封裝進質感淺灰色方塊
+            # 主體面板
             if y_price:
                 pnl_color = "#d32f2f" if item['pnl_money'] < 0 else "#388e3c"
                 pnl_arrow = "🔴" if item['pnl_money'] < 0 else "🟢"
@@ -515,8 +527,8 @@ with tab1:
 <small>📌 核心理由：{stock['core_reason']}</small>
 </div>''', unsafe_allow_html=True)
 
-            # 三大控制核心按鈕
-            c1, c2, c3 = st.columns([2, 2, 1])
+            # 🛠️ 移除結案按鈕，改為兩欄
+            c1, c2 = st.columns(2)
             with c1:
                 if st.button("加/減碼", key=f"op_btn_{db_id}", use_container_width=True):
                     st.session_state.op_mode[db_id] = not st.session_state.op_mode.get(db_id, False)
@@ -527,17 +539,8 @@ with tab1:
                     st.session_state.edit_mode[db_id] = not st.session_state.edit_mode.get(db_id, False)
                     st.session_state.op_mode[db_id] = False
                     st.rerun()
-            with c3:
-                if st.button("🛑 結案", key=f"cls_btn_{db_id}", use_container_width=True):
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE stock_master SET status='已結案' WHERE id=?", (db_id,))
-                    cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '手動結案', ?, ?, ?, '手動清倉移出')", (sid, datetime.today().strftime("%Y-%m-%d"), stock['avg_cost'], stock['shares']))
-                    conn.commit()
-                    conn.close()
-                    st.rerun()
 
-            # 控制匣一：快速「加/減碼」面板 (動態加權運算)
+            # 🛠️ 控制匣一：快速「加/減碼」面板 (動態加權運算)
             if st.session_state.op_mode.get(db_id, False):
                 with st.container(border=True):
                     st.caption("➕ 盤中快速【加/減碼】交易變動換算：")
@@ -559,7 +562,7 @@ with tab1:
                                 st.session_state[note_input_key] = t_text
                                 st.rerun()
                                 
-                    tx_note = st.text_area("📝 詳細操作理由：", value=st.session_state[note_input_key], key=note_input_key)
+                    tx_note = st.text_area("📝 詳細操作理由：", value=st.session_state[note_input_key], key=f"tx_txt_{db_id}")
                     
                     if st.button("💾 確定執行交易 (系統自動換算)", key=f"tx_submit_{db_id}", type="primary", use_container_width=True):
                         if tx_shares <= 0:
@@ -581,12 +584,14 @@ with tab1:
                             cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, ?, ?, ?, ?, ?)", (sid, tx_type, tx_date.strftime("%Y-%m-%d"), tx_price, tx_shares, tx_note))
                             conn.commit()
                             conn.close()
+                            
                             st.session_state.op_mode[db_id] = False
-                            st.session_state[note_input_key] = ""
+                            # 安全釋放狀態
+                            if note_input_key in st.session_state: del st.session_state[note_input_key]
                             st.success("交易換算並寫入完畢！")
                             st.rerun()
 
-            # 控制匣二：快速「細節修復編輯」面板 (動態表單連動)
+            # 🛠️ 控制匣二：快速「細節修復編輯」面板
             if st.session_state.edit_mode.get(db_id, False):
                 with st.container(border=True):
                     st.caption(f"🔧 修正【{sid}】庫存原始設定：")
@@ -596,7 +601,6 @@ with tab1:
                     u_shares = st.number_input("目前股數", value=float(stock['shares']), step=1.0, key=f"u_shares_{db_id}")
                     u_period = st.selectbox("投資週期分類", ["長期投資", "中期波段", "短期操作"], index=["長期投資", "中期波段", "短期操作"].index(stock['period']), key=f"u_per_{db_id}")
                     
-                    # 🎯 編輯介面也完成馬克策略參數自動連動
                     u_strat = st.selectbox("減碼紀律策略", ["2倍風險停利法", "強勢波段停利法"], index=["2倍風險停利法", "強勢波段停利法"].index(stock['strategy_type']), key=f"u_str_{db_id}")
                     u_sl = st.number_input("初始停損點 (%)", value=float(stock['stop_loss_pct']), step=0.1, key=f"u_sl_{db_id}")
                     
@@ -613,7 +617,11 @@ with tab1:
                     if st.button("💾 儲存個股修正", key=f"save_edit_{db_id}", type="primary", use_container_width=True):
                         conn = sqlite3.connect(DB_NAME)
                         cursor = conn.cursor()
-                        cursor.execute("UPDATE stock_master SET stock_id=?, stock_name=?, avg_cost=?, shares=?, period=?, strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=?, core_reason=? WHERE id=?", (u_id, u_name, u_cost, u_shares, u_period, u_strat, u_sl, u_tp, u_ratio, u_reason, db_id))
+                        # 如果股數改成 0，順便自動結案
+                        if u_shares <= 0:
+                            cursor.execute("UPDATE stock_master SET stock_id=?, stock_name=?, avg_cost=?, shares=0, period=?, strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=?, core_reason=?, status='已結案' WHERE id=?", (u_id, u_name, u_cost, u_period, u_strat, u_sl, u_tp, u_ratio, u_reason, db_id))
+                        else:
+                            cursor.execute("UPDATE stock_master SET stock_id=?, stock_name=?, avg_cost=?, shares=?, period=?, strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=?, core_reason=? WHERE id=?", (u_id, u_name, u_cost, u_shares, u_period, u_strat, u_sl, u_tp, u_ratio, u_reason, db_id))
                         conn.commit()
                         conn.close()
                         st.session_state.edit_mode[db_id] = False
@@ -622,7 +630,7 @@ with tab1:
             st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
 # ==========================================
-# 分頁二：個股生命週期故事書 (時序軸)
+# 分頁二：個股生命週期故事書 (歷史修改刪除)
 # ==========================================
 with tab2:
     st.subheader("🔍 單一個股生命週期全覆盤")
@@ -647,16 +655,46 @@ with tab2:
             if df_master_info.iloc[0]['period'] != '長期投資':
                 st.markdown(f"🛡️ **後半段保本追蹤防守價：${df_master_info.iloc[0]['avg_cost']}** (若減碼完成，賸餘持股請移至保本點防守)")
             
-        st.write("⏱️ 歷史操作決策流水帳：")
+        st.write("⏱️ 歷史操作決策流水帳 (含修改刪除功能)：")
+        st.caption("⚠️ 提示：若不慎誤按加/減碼，請在此處刪除錯誤紀錄後，至『今日總覽』的『快速編輯』將庫存股數與成本調整回正確數值。")
         for _, row in df_timeline.iterrows():
+            tl_id = row['id']
             badge = "🟢 買入/加碼" if row['action_type'] in ['初始建倉', '加碼'] else "🔴 紀律減碼/結案"
             with st.container(border=True):
                 st.markdown(f"**{row['op_date']} | {badge} ({row['action_type']})**")
                 st.markdown(f"成交價格: `${row['price']}` &nbsp;|&nbsp; 變動數量: `{row['shares_changed']:,} 股`")
                 st.markdown(f"💬 操盤回顧備忘：\n*{row['note']}*")
+                
+                # 歷史編輯修改刪除區域
+                with st.expander("✏️ 修改或刪除此紀錄"):
+                    u_tl_act = st.selectbox("操作類別", ["初始建倉", "加碼", "減碼", "手動結案", "已實現出場"], index=["初始建倉", "加碼", "減碼", "手動結案", "已實現出場"].index(row['action_type']) if row['action_type'] in ["初始建倉", "加碼", "減碼", "手動結案", "已實現出場"] else 0, key=f"tl_act_{tl_id}")
+                    u_tl_date = st.text_input("日期 (YYYY-MM-DD)", value=row['op_date'], key=f"tl_d_{tl_id}")
+                    u_tl_pr = st.number_input("價格", value=float(row['price']), step=0.01, key=f"tl_pr_{tl_id}")
+                    u_tl_sh = st.number_input("變動股數", value=float(row['shares_changed']), step=1.0, key=f"tl_sh_{tl_id}")
+                    u_tl_note = st.text_area("備忘日誌", value=row['note'], key=f"tl_no_{tl_id}")
+                    
+                    col_u1, col_u2 = st.columns(2)
+                    with col_u1:
+                        if st.button("💾 更新紀錄", key=f"tl_upd_{tl_id}", type="primary", use_container_width=True):
+                            conn = sqlite3.connect(DB_NAME)
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE stock_timeline SET action_type=?, op_date=?, price=?, shares_changed=?, note=? WHERE id=?", (u_tl_act, u_tl_date, u_tl_pr, u_tl_sh, u_tl_note, tl_id))
+                            conn.commit()
+                            conn.close()
+                            st.success("紀錄更新成功！")
+                            st.rerun()
+                    with col_u2:
+                        if st.button("🗑️ 刪除紀錄", key=f"tl_del_{tl_id}", use_container_width=True):
+                            conn = sqlite3.connect(DB_NAME)
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM stock_timeline WHERE id=?", (tl_id,))
+                            conn.commit()
+                            conn.close()
+                            st.warning("紀錄已刪除！")
+                            st.rerun()
 
 # ==========================================
-# 分頁三：月份進出場明細覆盤 (月報)
+# 分頁三：月份進出場明細覆盤 (含資料庫存檔)
 # ==========================================
 with tab3:
     st.subheader("📅 月度進出場決策大事記覆盤")
@@ -670,6 +708,12 @@ with tab3:
         selected_ym = st.selectbox("請選擇覆盤月份：", df_dates['ym'].tolist())
         conn = sqlite3.connect(DB_NAME)
         df_month = pd.read_sql_query(f"SELECT * FROM stock_timeline WHERE op_date LIKE '{selected_ym}%' ORDER BY op_date DESC", conn)
+        
+        # 讀取該月的檢討歷史真實紀錄
+        cursor = conn.cursor()
+        cursor.execute("SELECT review_text FROM monthly_reviews WHERE ym=?", (selected_ym,))
+        row_rev = cursor.fetchone()
+        existing_rev = row_rev[0] if row_rev else ""
         conn.close()
         
         st.write(f"### 🎯 {selected_ym} 操作紀律大事記")
@@ -682,9 +726,15 @@ with tab3:
             
         st.markdown("<br>", unsafe_allow_html=True)
         st.subheader("📝 交易員本月盲點與心態心流紀錄")
-        user_rev = st.text_area("寫下本月的紀律執行心得與優缺點檢討：", key=f"txt_rev_{selected_ym}")
+        user_rev = st.text_area("寫下本月的紀律執行心得與優缺點檢討：", value=existing_rev, key=f"txt_rev_{selected_ym}")
+        
         if st.button("💾 儲存月度檢討日誌", key=f"btn_rev_{selected_ym}", type="primary"):
-            st.success(f"{selected_ym} 心態日誌已妥善存檔！")
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO monthly_reviews (ym, review_text) VALUES (?, ?)", (selected_ym, user_rev))
+            conn.commit()
+            conn.close()
+            st.success(f"{selected_ym} 心態日誌已妥善存檔進入資料庫！")
 
 # ==========================================
 # 分頁四：馬克心法交易新法 (終極擴充名言交織版)
