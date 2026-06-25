@@ -4,7 +4,7 @@ import sqlite3
 import io
 from datetime import datetime
 
-# 嘗試匯入 yfinance
+# 嘗試匯入 yfinance 抓取即時價格
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
@@ -12,14 +12,11 @@ except ImportError:
     YFINANCE_AVAILABLE = False
 
 # ==========================================
-# 🎯 核心升級：台股中文名稱自動對照表 (上傳時自動轉換)
+# 🎯 台股中文名稱自動對照表 (上傳時自動轉換為 Yahoo 代號)
 # ==========================================
-# 只要券商 CSV 出現左邊的中文，系統上傳時會「自動轉換」成右邊的 Yahoo 標準代號，一勞永逸！
 TAIWAN_STOCK_MAP = {
     "凱基台灣TOP50": "00922.TW",
     "新特": "7815.TWO",
-    # 💡 未來如果有買新股票，可以直接在下方按照格式自己增加，例如：
-    # "台積電": "2330.TW",
 }
 
 DB_NAME = "stock_notebook.db"
@@ -97,7 +94,7 @@ def fetch_yahoo_price(stock_id, market):
         return None
 
 # ==========================================
-# 4. 券商 CSV 解析邏輯 (導入自動對照、修正台股顛倒)
+# 4. 券商 CSV 解析邏輯
 # ==========================================
 def parse_uploaded_csv(uploaded_file):
     bytes_data = uploaded_file.read()
@@ -143,24 +140,22 @@ def parse_uploaded_csv(uploaded_file):
             })
         return pd.DataFrame(parsed_data), "庫存"
         
-    # ─── 類型三：台股未實現彙總 CSV (修正顛倒與導入自動對照) ───
+    # ─── 類型三：台股未實現彙總 CSV ───
     elif '股票名稱' in df.columns and '成交均價' in df.columns and '股數' in df.columns:
         for _, row in df.iterrows():
             raw_name = str(row['股票名稱']).strip()
             if '總預估' in raw_name or '總融資' in raw_name or raw_name == '' or pd.isna(row['股數']): 
                 continue
             
-            # 1. 處理名稱與自動對照轉換代號
             stock_id = raw_name.split(" ")[0] if " " in raw_name else raw_name
             stock_name = raw_name.split(" ", 1)[1] if " " in raw_name else raw_name
             
-            # 🔍 核心自動轉換：如果對照表有設定，直接取代成 Yahoo 代號 (如 00922.TW / 7815.TWO)
+            # 自動對照轉換為 Yahoo 專用代號
             if stock_id in TAIWAN_STOCK_MAP:
                 stock_id = TAIWAN_STOCK_MAP[stock_id]
             elif stock_name in TAIWAN_STOCK_MAP:
                 stock_id = TAIWAN_STOCK_MAP[stock_name]
             
-            # 2. 修正對應：均價對成交均價，股數對股數
             shares_val = float(str(row['股數']).replace(',', ''))
             cost_val = float(str(row['成交均價']).replace(',', ''))
             
@@ -168,15 +163,15 @@ def parse_uploaded_csv(uploaded_file):
                 'market': '台股', 
                 'stock_id': stock_id, 
                 'stock_name': stock_name,
-                'avg_cost': cost_val,   # 均價成本
-                'shares': shares_val     # 持有股數
+                'avg_cost': cost_val,
+                'shares': shares_val
             })
         return pd.DataFrame(parsed_data), "庫存"
         
     return pd.DataFrame(), "未知"
 
 # ==========================================
-# 5. 庫存比對引擎 (精準比對)
+# 5. 庫存比對引擎
 # ==========================================
 def check_inventory_changes(df_new):
     if df_new.empty: return []
@@ -214,11 +209,20 @@ def check_inventory_changes(df_new):
     return events
 
 # ==========================================
-# 6. UI 介面設計
+# 6. UI 介面設計 (補回漏掉的關鍵手機分頁宣告)
 # ==========================================
+st.set_page_config(page_title="策略筆記本", layout="centered")
+st.title("📱 投資決策筆記本")
+
+# 💡 關鍵修復：宣告手機版分頁元件
+tab1, tab2, tab3 = st.tabs(["📊 今日動態/總覽", "🔍 個股時序", "📅 月份回顧"])
+
 if "yahoo_prices" not in st.session_state:
     st.session_state.yahoo_prices = {}
 
+# ------------------------------------------
+# 分頁一：今日動態與總覽
+# ------------------------------------------
 with tab1:
     st.subheader("📥 匯入最新 CSV 檔案")
     uploaded_file = st.file_uploader("支援上傳庫存或已實現 CSV", type=["csv"], label_visibility="collapsed")
@@ -231,7 +235,6 @@ with tab1:
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
             for _, row in df_parsed.iterrows():
-                # 💡 修正處：這裡加上了關鍵的逗號 (row['stock_id'],) 解決 SQL 報錯
                 cursor.execute("UPDATE stock_master SET status='已結案' WHERE stock_id=? AND status='持有'", (row['stock_id'],))
                 cursor.execute("""
                     INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note)
@@ -288,7 +291,6 @@ with tab1:
                                     UPDATE stock_master SET avg_cost = ?, shares = ? WHERE stock_id = ? AND status = '持有'
                                 """, (ev['new_cost'], ev['new_shares'], ev['stock_id']))
                             elif ev['type'] == '全數賣出':
-                                # 💡 修正處：補上尾隨逗號 (ev['stock_id'],) 徹底解決崩潰錯誤
                                 cursor.execute("UPDATE stock_master SET status = '已結案' WHERE stock_id = ? AND status = '持有'", (ev['stock_id'],))
                                 
                             conn.commit()
@@ -302,11 +304,11 @@ with tab1:
     st.markdown("---")
     with st.expander("➕ 手動新增 / 微調修改個股資料"):
         m_market = st.selectbox("市場", ["台股", "美股"])
-        m_id = st.text_input("股票代號 (如: 00922.TW / NVDA)")
-        m_name = st.text_input("股票名稱")
-        m_cost = st.number_input("平均成本", min_value=0.0, step=0.1)
-        m_shares = m_shares = st.number_input("目前總股數", min_value=0.0, step=1.0)
-        m_reason = st.text_area("初始核心理由 / 修改備註")
+        m_id = st.text_input("股票代號 (如: 00922.TW / NVDA)", key="manual_id")
+        m_name = st.text_input("股票名稱", key="manual_name")
+        m_cost = st.number_input("平均成本", min_value=0.0, step=0.1, key="manual_cost")
+        m_shares = st.number_input("目前總股數", min_value=0.0, step=1.0, key="manual_shares")
+        m_reason = st.text_area("初始核心理由 / 修改備註", key="manual_reason")
         
         if st.button("🚀 儲存變更至庫存", type="primary"):
             if m_id and m_name:
@@ -385,4 +387,53 @@ with tab1:
                     st.success(f"{sid} 已從庫存移除。")
                     st.rerun()
 
-# ─── 分頁二與分頁三程式碼維持原樣 ───
+# ------------------------------------------
+# 分頁二：個股時序
+# ------------------------------------------
+with tab2:
+    st.subheader("🔍 單一個股完整時序")
+    conn = sqlite3.connect(DB_NAME)
+    df_all_m = pd.read_sql_query("SELECT stock_id, stock_name FROM stock_master", conn)
+    conn.close()
+    if df_all_m.empty:
+        st.caption("尚無任何股票歷史資料。")
+    else:
+        options = [f"{r['stock_id']} {r['stock_name']}" for _, r in df_all_m.drop_duplicates().iterrows()]
+        selected_stock = st.selectbox("請選擇個股檢視：", options)
+        selected_id = selected_stock.split(" ")[0]
+        
+        conn = sqlite3.connect(DB_NAME)
+        df_timeline = pd.read_sql_query(f"SELECT * FROM stock_timeline WHERE stock_id='{selected_id}' ORDER BY op_date DESC", conn)
+        df_m_info = pd.read_sql_query(f"SELECT core_reason FROM stock_master WHERE stock_id='{selected_id}' LIMIT 1", conn)
+        conn.close()
+        
+        if not df_m_info.empty:
+            st.info(f"💡 置頂核心戰略母體理由：\n{df_m_info.iloc[0]['core_reason']}")
+        for _, row in df_timeline.iterrows():
+            color = "🟢" if "買" in row['action_type'] or "加" in row['action_type'] else "🔴"
+            with st.container(border=True):
+                st.markdown(f"{color} **{row['op_date']} | {row['action_type']}**")
+                st.write(f"參考價格: `${row['price']}` | 變動股數: `{row['shares_changed']}`")
+                st.markdown(f"💬 **理由**: {row['note']}")
+
+# ------------------------------------------
+# 分頁三：月份回顧
+# ------------------------------------------
+with tab3:
+    st.subheader("📅 月份進出場明細覆盤")
+    conn = sqlite3.connect(DB_NAME)
+    df_dates = pd.read_sql_query("SELECT DISTINCT substr(op_date, 1, 7) as ym FROM stock_timeline ORDER BY ym DESC", conn)
+    conn.close()
+    if df_dates.empty:
+        st.caption("目前尚無任何月份的操作數據。")
+    else:
+        selected_ym = st.selectbox("請選擇回顧月份：", df_dates['ym'].tolist())
+        conn = sqlite3.connect(DB_NAME)
+        df_month = pd.read_sql_query(f"SELECT * FROM stock_timeline WHERE op_date LIKE '{selected_ym}%' ORDER BY op_date DESC", conn)
+        conn.close()
+        st.write(f"### 🎯 {selected_ym} 操作大事記")
+        for _, row in df_month.iterrows():
+            badge = "🟩 [買入/動態]" if "買" in row['action_type'] or "加" in row['action_type'] else "🟥 [賣出/出場]"
+            st.markdown(f"**{row['op_date']}** | {badge} **{row['stock_id']}**")
+            st.markdown(f"└ 訊息/理由: *{row['note']}*")
+            st.markdown("---")
