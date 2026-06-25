@@ -283,7 +283,6 @@ with tab1:
     if st.session_state.csv_events:
         st.warning(f"⚠️ 偵測到 {len(st.session_state.csv_events)} 筆庫存異動事件！請配置您的交易紀律：")
         
-        # 複製一份清單避免迭代時刪除引發問題
         events_to_process = list(st.session_state.csv_events)
         
         for idx, ev in enumerate(events_to_process):
@@ -292,7 +291,6 @@ with tab1:
             with st.expander(f"【{ev['type']}】{sid} {row['stock_name']}", expanded=True):
                 st.write(f"• 異動新股數：{row['shares']:,} 股 | 均價成本：${row['avg_cost']}")
                 
-                # 核心防禦：強制分類與設定
                 csv_period = st.radio("🏷️ 1. 投資週期分類：", ["長期投資", "中期波段", "短期操作"], index=1, key=f"csv_per_{idx}", horizontal=True)
                 csv_strat = st.radio("⚙️ 2. 馬克紀律策略：", ["2倍風險停利法", "強勢波段停利法"], key=f"csv_str_{idx}", horizontal=True)
                 csv_sl = st.number_input("🛡️ 3. 初始停損點 (%)：", value=7.0, step=0.5, key=f"csv_sl_{idx}")
@@ -335,7 +333,6 @@ with tab1:
                     """, (sid, ev['type'], op_date.strftime("%Y-%m-%d"), row['avg_cost'], shares_diff, note_text))
                     conn.commit()
                     conn.close()
-                    # 移除已處理事件
                     st.session_state.csv_events = [e for i, e in enumerate(st.session_state.csv_events) if i != idx]
                     st.success("已成功同步寫入資料庫！")
                     st.rerun()
@@ -389,7 +386,6 @@ with tab1:
                 current_value = y_price * row['shares']
                 pnl_money = (y_price - row['avg_cost']) * row['shares']
                 
-                # 嚴格區分長中短期，長期徹底豁免
                 if row['period'] != '長期投資':
                     if profit_pct <= -row['stop_loss_pct']:
                         alert_status = "stop_loss"
@@ -398,7 +394,6 @@ with tab1:
                         if profit_pct >= target_pct:
                             alert_status = "take_profit"
             
-            # 強制置頂權重
             sort_weight = 0 if alert_status == "stop_loss" else (1 if alert_status == "take_profit" else 2)
             
             processed_stocks.append({
@@ -407,7 +402,6 @@ with tab1:
                 'alert_status': alert_status, 'sort_weight': sort_weight
             })
             
-        # 依據權重進行排序洗牌
         processed_stocks.sort(key=lambda x: x['sort_weight'])
 
     # 區塊 3：核心看板渲染
@@ -430,7 +424,7 @@ with tab1:
     else:
         for item in processed_stocks:
             stock = item['row']
-            db_id = stock['id']  # 🎯 絕對唯一的資料庫 ID，防崩潰神器
+            db_id = stock['id'] 
             sid = stock['stock_id']
             y_price = item['y_price']
             profit_pct = item['profit_pct']
@@ -448,31 +442,27 @@ with tab1:
             suggested_shares = round(stock['shares'] * (ratio_val / 100))
             expected_cash = round(suggested_shares * (take_profit_price), 1)
 
-            # A. 獨立渲染最頂端的強烈色彩策略警示框
+            # 🛑 取消左側空格縮排，防止 Streamlit 解析成 Markdown Code Block
             if item['alert_status'] == "stop_loss":
-                st.markdown(f"""
-                <div style="background-color: #ffebee; border-left: 8px solid #c62828; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #b71c1c;">
-                    <b style="font-size: 1.15rem;">🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
-                    <b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
-                    核心警示：目前即時損益已跌達 <span style="font-weight:bold; font-size:1.1rem;">{profit_pct:.2f}%</span>，觸及防守門檻 (-{stock['stop_loss_pct']:.1f}%)。<br>
-                    請立即開啟券商交易軟體，理性手起刀落執行全數停損，嚴控風險本金！
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div style="background-color: #ffebee; border-left: 8px solid #c62828; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #b71c1c;">
+<b>🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
+<b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
+核心警示：目前即時損益已跌達 <span style="font-weight:bold; font-size:1.1rem;">{profit_pct:.2f}%</span>，觸及防守門檻 (-{stock['stop_loss_pct']:.1f}%)。<br>
+請立即開啟券商交易軟體，理性手起刀落執行全數停損，嚴控風險本金！
+</div>""", unsafe_allow_html=True)
             elif item['alert_status'] == "take_profit":
                 expected_actual_cash = round(suggested_shares * (y_price if y_price else 0), 1)
-                st.markdown(f"""
-                <div style="background-color: #ffe0b2; border-left: 8px solid #f57c00; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #5d4037;">
-                    <b style="font-size: 1.15rem;">🔥 🚨 超級績效：已達馬克分批獲利停利點！</b><br>
-                    <b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
-                    ==========================================================<br>
-                    💰 當 前 獲 利 ％ ： <span style="color:#d84315; font-weight:bold;">+{profit_pct:.2f}%</span> (目標: +{target_pct_val:.1f}%)<br>
-                    🚪 門 檻 出 場 ％ ： 強制落袋 {ratio_val}% 庫存持股<br>
-                    🛒 應 下 單 股 數 ： <b>請至券商下單賣出 【 {suggested_shares:,} 】 股</b><br>
-                    💵 預計收回總金額 ： <b>${expected_actual_cash:,}</b><br>
-                    ==========================================================<br>
-                    <small>💡 續抱指引：減碼後，系統會自動將賸餘部位的防守點移至保本價 ${stock['avg_cost']}。</small>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div style="background-color: #ffe0b2; border-left: 8px solid #f57c00; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #5d4037;">
+<b>🔥 🚨 超級績效：已達馬克分批獲利停利點！</b><br>
+<b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
+==========================================================<br>
+💰 當 前 獲 利 ％ ： <span style="color:#d84315; font-weight:bold;">+{profit_pct:.2f}%</span> (目標: +{target_pct_val:.1f}%)<br>
+🚪 門 檻 出 場 ％ ： 強制落袋 {ratio_val}% 庫存持股<br>
+🛒 應 下 單 股 數 ： <b>請至券商下單賣出 【 {suggested_shares:,} 】 股</b><br>
+💵 預計收回總金額 ： <b>${expected_actual_cash:,}</b><br>
+==========================================================<br>
+<small>💡 續抱指引：減碼後，系統會自動將賸餘部位的防守點移至保本價 ${stock['avg_cost']}。</small>
+</div>""", unsafe_allow_html=True)
 
                 confirm_key = f"chk_action_{db_id}"
                 if st.checkbox("🧾 我已在券商完成此筆減碼下單 (勾選展開實際成交微調)", key=confirm_key):
@@ -500,51 +490,40 @@ with tab1:
                             st.success("紀錄已成功同步歸檔！")
                             st.rerun()
 
-            # B. 渲染主體個股卡片面板 (分流與常態指引)
             bg_color = "#e3f2fd" if stock['period'] == '長期投資' else "#ffffff"
             border_line = "6px solid #1e88e5" if stock['period'] == '長期投資' else "6px solid #757575"
             text_main_color = "#0d47a1" if stock['period'] == '長期投資' else "#333333"
             
-            # 建立動態看板區塊
+            # 🛑 取消左側空格縮排，防止 Streamlit 解析成 Markdown Code Block
             if y_price:
                 pnl_color = "#d32f2f" if item['pnl_money'] < 0 else "#388e3c"
                 pnl_arrow = "🔴" if item['pnl_money'] < 0 else "🟢"
                 
-                # 如果是中短期波段，強迫加上馬克常態操盤指引
                 mark_guide_html = ""
                 if stock['period'] != '長期投資':
-                    mark_guide_html = f"""
-                    <hr style="border-top: 1px solid #e0e0e0; margin: 8px 0;">
-                    <b>📜 馬克紀律常態操盤指引 (動態換算)：</b><br>
-                    • 🛑 嚴格停損線：<b>${stop_loss_price}</b> (破此價強制全清倉 {stock['shares']} 股)<br>
-                    • 🎯 分批停利點：<b>${take_profit_price}</b> (達此價強制落袋減碼 {suggested_shares} 股，預計收回 $ {expected_cash})
-                    """
+                    mark_guide_html = f"""<hr style="border-top: 1px solid #e0e0e0; margin: 8px 0;">
+<b>📜 馬克紀律常態操盤指引 (動態換算)：</b><br>
+• 🛑 嚴格停損線：<b>${stop_loss_price}</b> (破此價強制全清倉 {stock['shares']} 股)<br>
+• 🎯 分批停利點：<b>${take_profit_price}</b> (達此價強制落袋減碼 {suggested_shares} 股，預計收回 $ {expected_cash})"""
 
-                stats_block = f"""
-                <div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #424242;">
-                    🏢 最新市價：<b>{y_price}</b> &nbsp;|&nbsp; 當前現值：<b>${item['current_value']:,.1f}</b><br>
-                    即時損益：<span style="color:{pnl_color}; font-weight:bold;">{pnl_arrow} {profit_pct:.2f}%</span> &nbsp;|&nbsp; 帳面獲利提示：<span style="color:{pnl_color}; font-weight:bold;">${item['pnl_money']:,.1f}</span>
-                    {mark_guide_html}
-                </div>
-                """
+                stats_block = f"""<div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #424242;">
+🏢 最新市價：<b>{y_price}</b> &nbsp;|&nbsp; 當前現值：<b>${item['current_value']:,.1f}</b><br>
+即時損益：<span style="color:{pnl_color}; font-weight:bold;">{pnl_arrow} {profit_pct:.2f}%</span> &nbsp;|&nbsp; 帳面獲利提示：<span style="color:{pnl_color}; font-weight:bold;">${item['pnl_money']:,.1f}</span>
+{mark_guide_html}
+</div>"""
             else:
-                stats_block = """
-                <div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #757575; font-style: italic;">
-                    ⚪ 帳產現值未經刷新，請點選右上角按鈕動態連動 Yahoo 股市。
-                </div>
-                """
+                stats_block = """<div style="background-color: #f5f5f5; border-radius: 6px; padding: 10px; margin: 8px 0; border: 1px solid #e0e0e0; color: #757575; font-style: italic;">
+⚪ 帳產現值未經刷新，請點選右上角按鈕動態連動 Yahoo 股市。
+</div>"""
                 
-            # 🔥 修正 HTML 渲染問題 (使用 unsafe_allow_html=True)
-            st.markdown(f"""
-            <div style="background-color: {bg_color}; border: 1px solid #e0e0e0; border-left: {border_line}; padding: 14px; border-radius: 6px; color: {text_main_color};">
-                <b style="font-size:1.1rem;">{'💠' if stock['period']=='長期投資' else '🛡️'} 【{stock['market']}】{sid} {stock['stock_name']}</b> ({stock['period']})<br>
-                庫存均價：<b>${stock['avg_cost']}</b> &nbsp;|&nbsp; 持有股數：<b>{stock['shares']:,} 股</b>
-                {stats_block}
-                <small>📌 核心理由：{stock['core_reason']}</small>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f"""<div style="background-color: {bg_color}; border: 1px solid #e0e0e0; border-left: {border_line}; padding: 14px; border-radius: 6px; color: {text_main_color};">
+<b style="font-size:1.1rem;">{'💠' if stock['period']=='長期投資' else '🛡️'} 【{stock['market']}】{sid} {stock['stock_name']}</b> ({stock['period']})<br>
+庫存均價：<b>${stock['avg_cost']}</b> &nbsp;|&nbsp; 持有股數：<b>{stock['shares']:,} 股</b>
+{stats_block}
+<small>📌 核心理由：{stock['core_reason']}</small>
+</div>""", unsafe_allow_html=True)
 
-            # 三大控制核心按鈕 (全數綁定 db_id)
+            # 三大控制核心按鈕
             c1, c2, c3 = st.columns([2, 2, 1])
             with c1:
                 if st.button("加/減碼", key=f"op_btn_{db_id}", use_container_width=True):
@@ -569,7 +548,7 @@ with tab1:
                     conn.close()
                     st.rerun()
 
-            # 🛠️ 控制匣一：快速「加/減碼」面板 (動態加權運算)
+            # 控制匣一：快速「加/減碼」面板
             if st.session_state.op_mode.get(db_id, False):
                 with st.container(border=True):
                     st.caption("➕ 盤中快速【加/減碼】交易變動換算：")
@@ -621,7 +600,7 @@ with tab1:
                             st.success("交易換算並寫入完畢！")
                             st.rerun()
 
-            # 🛠️ 控制匣二：快速「細節修復編輯」面板
+            # 控制匣二：快速「細節修復編輯」面板
             if st.session_state.edit_mode.get(db_id, False):
                 with st.container(border=True):
                     st.caption(f"🔧 修正【{sid}】庫存原始設定：")
