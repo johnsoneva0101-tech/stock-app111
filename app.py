@@ -678,11 +678,7 @@ with tab2:
             
         st.write("⏱️ 歷史操作決策流水帳 (歷史刪除完全連動追溯)：")
         
-        # 🎯 終極防撞鎖：完全拔除迴圈 Index，純粹使用唯一的 tl_id 作為身份證 (修正 Bug 2)
-        for row in df_timeline.itertuples():
-            tl_id = getattr(row, 'id')
-            row_action = getattr(row, 'action_type')
-            row_date = get# 🎯 終極防撞鎖修正：應對資料庫中可能存在的歷史重複 ID，我們加入 idx_loop 進行前端強制複合鎖定
+        # 修正後的安全迴圈邏輯
         for idx_loop, row in enumerate(df_timeline.itertuples()):
             tl_id = getattr(row, 'id')
             row_action = getattr(row, 'action_type')
@@ -699,7 +695,6 @@ with tab2:
                 st.markdown(f"💬 操盤回顧日誌：\n*{row_note}*")
                 
                 with st.expander("🛠️ 修改或刪除此單筆歷史大事記"):
-                    # 加入 idx_loop 形成絕對不會重複的複合 Key
                     act_k = f"widget_tl_act_{tl_id}_{idx_loop}"
                     date_k = f"widget_tl_d_{tl_id}_{idx_loop}"
                     pr_k = f"widget_tl_pr_{tl_id}_{idx_loop}"
@@ -719,11 +714,9 @@ with tab2:
                         if st.button("💾 更新此筆流水紀錄", key=f"widget_tl_submit_upd_{tl_id}_{idx_loop}", type="primary", use_container_width=True):
                             conn = sqlite3.connect(DB_NAME)
                             cursor = conn.cursor()
-                            # 寫入時依然對準真實的 tl_id，保證後台數據對齊
                             cursor.execute("UPDATE stock_timeline SET action_type=?, op_date=?, price=?, shares_changed=?, pnl=?, note=? WHERE id=?", (st.session_state[act_k], st.session_state[date_k], st.session_state[pr_k], st.session_state[sh_k], st.session_state[pnl_k], st.session_state[no_k], tl_id))
                             conn.commit()
                             conn.close()
-                            
                             sync_inventory_from_timeline(selected_id)
                             st.success("流水帳修改成功，母體庫存已動態更新！")
                             st.rerun()
@@ -735,7 +728,6 @@ with tab2:
                             cursor.execute("DELETE FROM stock_timeline WHERE id=?", (tl_id,))
                             conn.commit()
                             conn.close()
-                            
                             sync_inventory_from_timeline(selected_id)
                             st.warning("該紀錄已徹底註銷，總體持有庫存已 100% 即時自動追溯修正！")
                             st.rerun()
