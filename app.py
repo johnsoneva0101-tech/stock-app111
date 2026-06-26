@@ -682,6 +682,10 @@ with tab2:
         for row in df_timeline.itertuples():
             tl_id = getattr(row, 'id')
             row_action = getattr(row, 'action_type')
+            row_date = get# 🎯 終極防撞鎖修正：應對資料庫中可能存在的歷史重複 ID，我們加入 idx_loop 進行前端強制複合鎖定
+        for idx_loop, row in enumerate(df_timeline.itertuples()):
+            tl_id = getattr(row, 'id')
+            row_action = getattr(row, 'action_type')
             row_date = getattr(row, 'op_date')
             row_price = getattr(row, 'price')
             row_shares = getattr(row, 'shares_changed')
@@ -695,12 +699,13 @@ with tab2:
                 st.markdown(f"💬 操盤回顧日誌：\n*{row_note}*")
                 
                 with st.expander("🛠️ 修改或刪除此單筆歷史大事記"):
-                    act_k = f"widget_tl_act_{tl_id}"
-                    date_k = f"widget_tl_d_{tl_id}"
-                    pr_k = f"widget_tl_pr_{tl_id}"
-                    sh_k = f"widget_tl_sh_{tl_id}"
-                    pnl_k = f"widget_tl_pnl_{tl_id}"
-                    no_k = f"widget_tl_no_{tl_id}"
+                    # 加入 idx_loop 形成絕對不會重複的複合 Key
+                    act_k = f"widget_tl_act_{tl_id}_{idx_loop}"
+                    date_k = f"widget_tl_d_{tl_id}_{idx_loop}"
+                    pr_k = f"widget_tl_pr_{tl_id}_{idx_loop}"
+                    sh_k = f"widget_tl_sh_{tl_id}_{idx_loop}"
+                    pnl_k = f"widget_tl_pnl_{tl_id}_{idx_loop}"
+                    no_k = f"widget_tl_no_{tl_id}_{idx_loop}"
                     
                     st.selectbox("操作類別", ["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"], index=["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"].index(row_action) if row_action in ["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"] else 0, key=act_k)
                     st.text_input("日期 (YYYY-MM-DD)", value=row_date, key=date_k)
@@ -711,9 +716,10 @@ with tab2:
                     
                     col_hist_u1, col_hist_u2 = st.columns(2)
                     with col_hist_u1:
-                        if st.button("💾 更新此筆流水紀錄", key=f"widget_tl_submit_upd_{tl_id}", type="primary", use_container_width=True):
+                        if st.button("💾 更新此筆流水紀錄", key=f"widget_tl_submit_upd_{tl_id}_{idx_loop}", type="primary", use_container_width=True):
                             conn = sqlite3.connect(DB_NAME)
                             cursor = conn.cursor()
+                            # 寫入時依然對準真實的 tl_id，保證後台數據對齊
                             cursor.execute("UPDATE stock_timeline SET action_type=?, op_date=?, price=?, shares_changed=?, pnl=?, note=? WHERE id=?", (st.session_state[act_k], st.session_state[date_k], st.session_state[pr_k], st.session_state[sh_k], st.session_state[pnl_k], st.session_state[no_k], tl_id))
                             conn.commit()
                             conn.close()
@@ -723,7 +729,7 @@ with tab2:
                             st.rerun()
                             
                     with col_hist_u2:
-                        if st.button("🗑️ 刪除此筆交易紀錄", key=f"widget_tl_submit_del_{tl_id}", use_container_width=True):
+                        if st.button("🗑️ 刪除此筆交易紀錄", key=f"widget_tl_submit_del_{tl_id}_{idx_loop}", use_container_width=True):
                             conn = sqlite3.connect(DB_NAME)
                             cursor = conn.cursor()
                             cursor.execute("DELETE FROM stock_timeline WHERE id=?", (tl_id,))
