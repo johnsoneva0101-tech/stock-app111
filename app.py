@@ -1,4 +1,4 @@
-import streamlit st
+import streamlit as st
 import pandas as pd
 import sqlite3
 import io
@@ -20,8 +20,8 @@ DB_NAME = "stock_notebook.db"
 # ==========================================
 def sync_inventory_from_timeline(stock_id):
     """
-    【數據一致性防線：終極修正版】
-    無論操盤手做手動加減碼、CSV 匯入，還是在時序軸刪除/修改歷史，
+    【數據一致性防線】
+    無論操盤手做手動加減碼、CSV匯入，還是在時序軸刪除/修改歷史，
     大腦都會無條件重新清算該股所有流水帳，完美動態對齊庫存股數與動態加權成本！
     """
     conn = sqlite3.connect(DB_NAME)
@@ -143,7 +143,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# 3. 馬克大師理由指引庫與 Callback 函數
+# 3. 馬克大師理由指引庫與 Callback 狀態注入函數
 # ==========================================
 TEMPLATES = {
     "🟢 買入/加碼": [
@@ -162,9 +162,57 @@ TEMPLATES = {
     ]
 }
 
-# 【核心修正】利用標準 Callback 在 Widget 渲染前完成 State 注入，保證一鍵套用秒生效
+# 【核心修正】回呼函數：利用標準 Callback 在 Widget 渲染前完成 State 注入，防前台快取覆蓋
 def set_template_text(target_key, text):
     st.session_state[target_key] = text
+
+# 【加減碼提交回呼函數】防範 Streamlit 渲染期修改狀態引發崩潰
+def submit_panel_tx_callback(db_id, sid, type_key, price_key, shares_key, date_key, note_key):
+    shares_val = st.session_state.get(shares_key, 0.0)
+    if shares_val <= 0:
+        st.session_state[f"panel_err_{db_id}"] = "❌ 請輸入大於 0 的交易股數！"
+        return
+    
+    act_type = st.session_state.get(type_key, "加碼")
+    price_val = st.session_state.get(price_key, 0.0)
+    date_val = st.session_state.get(date_key, datetime.today().date())
+    note_val = st.session_state.get(note_key, "")
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) 
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (sid, act_type, str(date_val), price_val, shares_val, note_val))
+    conn.commit()
+    conn.close()
+    
+    sync_inventory_from_timeline(sid)
+    st.session_state["op_mode"][db_id] = False
+    st.session_state[note_key] = ""
+    if f"panel_err_{db_id}" in st.session_state: del st.session_state[f"panel_err_{db_id}"]
+
+# 【時序軸操作回呼函數】確保更新/刪除完全重算連動庫存
+def update_timeline_callback(tl_id, stock_id, act_key, date_key, pr_key, sh_key, no_key):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE stock_timeline SET action_type=?, op_date=?, price=?, shares_changed=?, note=? 
+        WHERE id=?
+    """, (st.session_state[act_key], st.session_state[date_key], st.session_state[pr_key], st.session_state[sh_key], st.session_state[no_key], tl_id))
+    conn.commit()
+    conn.close()
+    sync_inventory_from_timeline(stock_id)
+    st.session_state["msg_tl_global"] = "✅ 歷史流水帳修改成功，總持股庫存已全自動重新加權對齊！"
+
+def delete_timeline_callback(tl_id, stock_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM stock_timeline WHERE id=?", (tl_id,))
+    conn.commit()
+    conn.close()
+    sync_inventory_from_timeline(stock_id)
+    st.session_state["msg_tl_global"] = "⚠️ 該歷史交易紀錄已註銷，總體持有庫存股數已即時動態追溯修正！"
 
 def get_custom_mappings():
     conn = sqlite3.connect(DB_NAME)
@@ -451,7 +499,6 @@ with tab1:
                             cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '減碼', ?, ?, ?, ?)", (sid, actual_date.strftime("%Y-%m-%d"), actual_price, actual_shares, note_msg))
                             conn.commit()
                             conn.close()
-                            
                             sync_inventory_from_timeline(sid)
                             if confirm_key in st.session_state: del st.session_state[confirm_key]
                             st.success("紀錄已歸帳並動態連動修正庫存！")
@@ -506,15 +553,21 @@ with tab1:
             if st.session_state["op_mode"].get(db_id, False):
                 with st.container(border=True):
                     st.caption("➕ 盤中快速【加/減碼】交易變動換算：")
-                    tx_type = st.radio("操作類別", ["加碼", "減碼"], key=f"panel_tx_type_{db_id}", horizontal=True)
-                    tx_price = st.number_input("成交單價", value=float(y_price if y_price else stock['avg_cost']), step=0.01, key=f"panel_tx_price_{db_id}")
-                    tx_shares = st.number_input("交易股數", value=0.0, step=1.0, key=f"panel_tx_shares_{db_id}")
-                    tx_date = st.date_input("操作日期", value=datetime.today(), key=f"panel_tx_date_{db_id}")
-                    
-                    st.caption("⚡ 快速套用加減碼理由模板：")
-                    pool = TEMPLATES["🟢 買入/加碼"] if tx_type == "加碼" else TEMPLATES["🔴 賣出/減碼"]
-                    
+                    panel_tx_type_key = f"panel_tx_type_{db_id}"
+                    panel_tx_price_key = f"panel_tx_price_{db_id}"
+                    panel_tx_shares_key = f"panel_tx_shares_{db_id}"
+                    panel_tx_date_key = f"panel_tx_date_{db_id}"
                     tx_note_key = f"panel_note_area_{db_id}"
+                    
+                    st.radio("操作類別", ["加碼", "減碼"], key=panel_tx_type_key, horizontal=True)
+                    st.number_input("成交單價", value=float(y_price if y_price else stock['avg_cost']), step=0.01, key=panel_tx_price_key)
+                    st.number_input("交易股數", value=0.0, step=1.0, key=panel_tx_shares_key)
+                    st.date_input("操作日期", value=datetime.today(), key=panel_tx_date_key)
+                    
+                    tx_type_curr = st.session_state.get(panel_tx_type_key, "加碼")
+                    st.caption("⚡ 快速套用加減碼理由模板：")
+                    pool = TEMPLATES["🟢 買入/加碼"] if tx_type_curr == "加碼" else TEMPLATES["🔴 賣出/減碼"]
+                    
                     if tx_note_key not in st.session_state: st.session_state[tx_note_key] = ""
                     
                     cols_tx = st.columns(2)
@@ -522,23 +575,13 @@ with tab1:
                         with cols_tx[b_idx % 2]:
                             st.button(t_text[:12] + "...", key=f"panel_tpl_btn_{db_id}_{b_idx}", on_click=set_template_text, args=(tx_note_key, t_text))
                                 
-                    tx_note = st.text_area("📝 詳細操作理由：", key=tx_note_key)
+                    st.text_area("📝 詳細操作理由：", key=tx_note_key)
                     
-                    if st.button("💾 確定執行交易 (系統自動換算)", key=f"panel_tx_submit_{db_id}", type="primary", use_container_width=True):
-                        if tx_shares <= 0:
-                            st.error("請輸入大於 0 的交易股數！")
-                        else:
-                            conn = sqlite3.connect(DB_NAME)
-                            cursor = conn.cursor()
-                            cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, ?, ?, ?, ?, ?)", (sid, tx_type, tx_date.strftime("%Y-%m-%d"), tx_price, tx_shares, tx_note))
-                            conn.commit()
-                            conn.close()
-                            
-                            sync_inventory_from_timeline(sid)
-                            st.session_state["op_mode"][db_id] = False
-                            if tx_note_key in st.session_state: del st.session_state[tx_note_key]
-                            st.success("盤中變動執行完畢，庫存已動態加權對齊！")
-                            st.rerun()
+                    # 🎯 透過獨立的 Callback 提交交易
+                    if st.button("💾 確定執行交易 (系統自動換算)", key=f"panel_tx_submit_{db_id}", type="primary", use_container_width=True, on_click=submit_panel_tx_callback, args=(db_id, sid, panel_tx_type_key, panel_tx_price_key, panel_tx_shares_key, panel_tx_date_key, tx_note_key)):
+                        st.rerun()
+                    if f"panel_err_{db_id}" in st.session_state and st.session_state[f"panel_err_{db_id}"]:
+                        st.error(st.session_state[f"panel_err_{db_id}"])
 
             # 🛠️ 控制匣二：快速「細節修復編輯」面板
             if st.session_state["edit_mode"].get(db_id, False):
@@ -581,6 +624,10 @@ with tab1:
 # ==========================================
 with tab2:
     st.subheader("🔍 單一個股生命週期全覆盤")
+    if "msg_tl_global" in st.session_state and st.session_state["msg_tl_global"]:
+        st.success(st.session_state["msg_tl_global"])
+        st.session_state["msg_tl_global"] = ""
+
     conn = sqlite3.connect(DB_NAME)
     df_all_m = pd.read_sql_query("SELECT DISTINCT stock_id, stock_name FROM stock_master ORDER BY stock_id ASC", conn)
     conn.close()
@@ -600,48 +647,37 @@ with tab2:
         if not df_master_info.empty:
             st.info(f"💡 置頂初始核心戰略理由：\n{df_master_info.iloc[0]['core_reason']}")
             if df_master_info.iloc[0]['period'] != '長期投資':
-                st.markdown(f"🛡️ **後半段保本追蹤防守價：${df_master_info.iloc[0]['avg_cost']}** (若分批減碼成功，賸餘持股請移至此利潤保本點防守)")
+                st.markdown(f"🛡️ **後半段保本追蹤防守價：${df_master_info.iloc[0]['avg_cost']}** (若分批減碼成功，賫餘持股請移至此利潤保本點防守)")
             
         st.write("⏱️ 歷史操作決策流水帳 (歷史刪除修補完全連動)：")
+        st.caption("🔥 【操盤防線】在下方時序中點選「刪除紀錄」或「更新紀錄」，庫存母表的總股數與均價將自動動態計量重算，不失真！")
         
         for _, row in df_timeline.iterrows():
             tl_id = row['id']
             badge = "🟢 買入/加碼" if row['action_type'] in ['初始建倉', '加碼'] else "🔴 紀律減碼/結案"
             with st.container(border=True):
                 st.markdown(f"**{row['op_date']} | {badge} ({row['action_type']})**")
-                st.markdown(f"成交價格: `${row['price']}` &nbsp;|&nbsp; 變動數量: `{row['shares_changed']:,} 股`")
+                st.markdown(f"成交價格: `{row['price']}` &nbsp;|&nbsp; 變動數量: `{row['shares_changed']:,} 股`")
                 st.markdown(f"💬 操盤回顧日誌：\n*{row['note']}*")
                 
                 with st.expander("🛠️ 修改或刪除此單筆歷史大事記"):
-                    u_tl_act = st.selectbox("操作類別", ["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"], index=["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"].index(row['action_type']) if row['action_type'] in ["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"] else 0, key=f"tl_act_box_{tl_id}")
-                    u_tl_date = st.text_input("日期 (YYYY-MM-DD)", value=row['op_date'], key=f"tl_d_box_{tl_id}")
-                    u_tl_pr = st.number_input("價格", value=float(row['price']), step=0.01, key=f"tl_pr_box_{tl_id}")
-                    u_tl_sh = st.number_input("變動股數", value=float(row['shares_changed']), step=1.0, key=f"tl_sh_box_{tl_id}")
-                    u_tl_note = st.text_area("日誌細節備忘", value=row['note'], key=f"tl_no_box_{tl_id}")
+                    act_k = f"tl_act_box_{tl_id}"
+                    date_k = f"tl_d_box_{tl_id}"
+                    pr_k = f"tl_pr_box_{tl_id}"
+                    sh_k = f"tl_sh_box_{tl_id}"
+                    no_k = f"tl_no_box_{tl_id}"
+                    
+                    st.selectbox("操作類別", ["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"], index=["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"].index(row['action_type']) if row['action_type'] in ["初始建倉", "加碼", "減碼", "已實現出場", "手動結案"] else 0, key=act_k)
+                    st.text_input("日期 (YYYY-MM-DD)", value=row['op_date'], key=date_k)
+                    st.number_input("價格", value=float(row['price']), step=0.01, key=pr_k)
+                    st.number_input("變動股數", value=float(row['shares_changed']), step=1.0, key=sh_k)
+                    st.text_area("日誌細節備忘", value=row['note'], key=no_k)
                     
                     col_hist_u1, col_hist_u2 = st.columns(2)
                     with col_hist_u1:
-                        if st.button("💾 更新紀錄", key=f"tl_submit_upd_{tl_id}", type="primary", use_container_width=True):
-                            conn = sqlite3.connect(DB_NAME)
-                            cursor = conn.cursor()
-                            cursor.execute("UPDATE stock_timeline SET action_type=?, op_date=?, price=?, shares_changed=?, note=? WHERE id=?", (u_tl_act, u_tl_date, u_tl_pr, u_tl_sh, u_tl_note, tl_id))
-                            conn.commit()
-                            conn.close()
-                            
-                            sync_inventory_from_timeline(selected_id)
-                            st.success("流水帳修改成功，總庫存已自動重算！")
-                            st.rerun()
+                        st.button("💾 更新紀錄", key=f"tl_submit_upd_{tl_id}", type="primary", use_container_width=True, on_click=update_timeline_callback, args=(tl_id, selected_id, act_k, date_k, pr_k, sh_k, no_k))
                     with col_hist_u2:
-                        if st.button("🗑️ 刪除紀錄", key=f"tl_submit_del_{tl_id}", use_container_width=True):
-                            conn = sqlite3.connect(DB_NAME)
-                            cursor = conn.cursor()
-                            cursor.execute("DELETE FROM stock_timeline WHERE id=?", (tl_id,))
-                            conn.commit()
-                            conn.close()
-                            
-                            sync_inventory_from_timeline(selected_id)
-                            st.warning("該紀錄已註銷，總體庫存已連動修正！")
-                            st.rerun()
+                        st.button("🗑️ 刪除紀錄", key=f"tl_submit_del_{tl_id}", use_container_width=True, on_click=delete_timeline_callback, args=(tl_id, selected_id))
 
 # ==========================================
 # 分頁三：月份進出場明細覆盤
@@ -696,7 +732,7 @@ with tab4:
 ### 🎯 一、 Risks First 思維與期望值防禦 (操盤手的生命線)
 * **💥 虧損控制的鐵律**
   > *「如果你不能忍受小虧損，遲早會面臨所有虧損之母。」*
-  > *「輸家才會攤平輸家 (Losers average losers)！在錯誤的標的上攤平，只是在為你的傲慢支付雙倍罰款。」*
+  > *「輸家才會攤平輸家 (Losers average losers)！在錯誤的標不上攤平，只是在為你的傲慢支付雙倍罰款。」*
   
   馬克強調，進場前如果沒有算好停損點，就絕對不按下單鈕。本金防禦大於一切，一檔股票讓你賠掉 7%，你只需要賺 7.5% 就能回本；但如果放任虧損砍半跌掉 50%，你必須賺 100% 才能翻身。
   
@@ -727,7 +763,7 @@ with tab4:
   1. **波段首波達標 (Base Hit)**：底部型態（如 VCP）帶量平台突破後快速暴漲 15% ~ 25%，此時通常會面臨首波平台拉回。
   2. **均線乖離率過大 (Extension)**：股價拋離 20 日均線超過 15%~20%，或拋離 50 日均線超過 30%，隨時會像橡皮筋裂開一樣猛烈向均線回彈。
   3. **趕頂垂直噴發 (Climax Run)**：股票連續大漲數月，末段出現角度高達 75 度以上的垂直噴發，爆出歷史天量且利多連發。
-  4. **竭盡缺口與最大價差**：巨幅跳空開高、或出現起漲以來單日最長大紅K。
+  4. **竭盡缺口與單日最大價差**：巨幅跳空開高、或出現起漲以來單日最長大紅K。
   
 * **🪜 減碼後剩下的持股，該如何詳細續抱？**
   * **移至保本價**：第一時間將剩下的停損點移到買入成本價，鎖死底線。
@@ -738,7 +774,7 @@ with tab4:
 ---
 ### 🚨 四、 法人撤資與全面清倉結案訊號
 * **💥 當大勢已去，手起刀落全面離場**
-  > *「操盤手不與股票談戀愛。當大戶的腳步已經撤離，你必須比他們跑得更快。」*
+  > *「操盤手不與股票談戀愛。當大戶的腳步已經撤離，你必須比他們跑編更快。」*
   
   當股價高檔爆量跌破 50MA（季線），且隨後幾天反彈皆無力站回。這意味著主力資金正式出清，大趨勢已經終結，剩下的持股必須全數清倉、絕不留戀。
 
@@ -747,5 +783,5 @@ with tab4:
 * **🔍 尋找市場的臨界點 (Pivot Point)**
   > *「我尋找的不是便宜的低價股票，而是準備好要瘋狂飆漲的股票。」*
   
-  籌碼會從散戶（軟手）轉移到主力大戶（強手）手中。表現出每次拉回修正的幅度越來越小（如：30% ➔ 15% ➔ 7% ➔ 3%），且在最右側成交量極度萎縮窒息，代表沒人想賣了。此時一根**帶量突破臨界點（Pivot）**的長紅K，就是最完美的初始進場一擊。
+  籌碼會從散戶（軟手）轉移到主力大戶（強手）手中。表現出每次拉回修正的幅度越來越小（如：30% ➔ 15% ➔ 7% ➔ 3%），且在最右側成交量極度萎縮窒息，代表市場上想賣的人都賣光了。此時只要出現一根**帶量突破臨界點（Pivot）**的長紅K，就是最完美的初始進場一擊。
 ''')
