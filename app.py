@@ -144,7 +144,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# 3. 馬克大師四大理由指引庫
+# 3. 馬克大師四大理由指引庫與 Callback 函數
 # ==========================================
 TEMPLATES = {
     "🟢 買入/加碼": [
@@ -162,6 +162,10 @@ TEMPLATES = {
         "🔄 汰弱留強，將資金回收，準備轉往其他更具效益的核心資產。"
     ]
 }
+
+# 【核心修復】回呼函數：安全地將模板文字存入暫存變數，避免直接修改綁定好的 widget key 導致報錯
+def set_template_text(target_key, text):
+    st.session_state[f"temp_{target_key}"] = text
 
 def get_custom_mappings():
     conn = sqlite3.connect(DB_NAME)
@@ -239,8 +243,19 @@ def parse_uploaded_csv(uploaded_file):
     return pd.DataFrame(), "未知"
 
 # ==========================================
-# 4. 頂層側邊欄備份核心
+# 4. UI 介面與狀態初始化
 # ==========================================
+st.set_page_config(page_title="策略紀律筆記本", layout="centered")
+st.title("📱 投資決策紀律筆記本")
+
+tab1, tab2, tab3, tab4 = st.tabs(["📊 今日總覽", "🔍 個股時序", "📅 月覆盤", "💡 馬克心法"])
+
+if "yahoo_prices" not in st.session_state: st.session_state.yahoo_prices = {}
+if "edit_mode" not in st.session_state: st.session_state.edit_mode = {}
+if "op_mode" not in st.session_state: st.session_state.op_mode = {}
+if "csv_events" not in st.session_state: st.session_state.csv_events = []
+
+# ─── 側邊欄工具 ───
 with st.sidebar:
     st.header("📦 系統工具與備份支援")
     if st.button("📤 導出全系統備份 Excel", use_container_width=True):
@@ -277,8 +292,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🔄 自訂台股 Yahoo 對照表")
-    new_raw = st.text_input("券商 CSV 中文名")
-    new_yid = st.text_input("Yahoo 代號")
+    new_raw = st.text_input("券商 CSV 中文名 (如: 台積電)")
+    new_yid = st.text_input("Yahoo 代號 (如: 2330.TW)")
     if st.button("➕ 儲存對照項目", use_container_width=True) and new_raw and new_yid:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -326,7 +341,7 @@ with tab1:
                         events.append({'type': ev_type, 'data': row, 'old_shares': old_item['shares'], 'old_cost': old_item['avg_cost']})
             st.session_state.csv_events = events
 
-    # 📥 【CSV 匯入互動確認匣】(全綁定與理由持久化修正)
+    # 📥 【CSV 匯入互動確認匣】
     if st.session_state.csv_events:
         st.warning(f"⚠️ 偵測到 {len(st.session_state.csv_events)} 筆庫存異動事件！")
         events_to_process = list(st.session_state.csv_events)
@@ -354,18 +369,17 @@ with tab1:
                 st.caption("⚡ 5. 快速套用操作理由模板：")
                 pool = TEMPLATES["🟢 買入/加碼"] if ev['type'] in ['初始建倉', '加碼'] else TEMPLATES["🔴 賣出/減碼"]
                 
-                # 【核心修正】錨定唯一的 Session State 記憶理由防止對齊失效
-                csv_note_key = f"state_note_csv_{idx}"
-                if csv_note_key not in st.session_state: st.session_state[csv_note_key] = ""
+                csv_note_key = f"csv_note_area_{idx}"
+                # 如果暫存變數有值，就帶入 text_area 作為預設值
+                default_text = st.session_state.get(f"temp_{csv_note_key}", "")
                 
                 cols = st.columns(2)
                 for b_idx, t_text in enumerate(pool):
                     with cols[b_idx % 2]:
-                        if st.button(t_text[:12] + "...", key=f"csv_tpl_btn_{idx}_{b_idx}"):
-                            st.session_state[csv_note_key] = t_text
-                            st.rerun()
+                        # 使用 callback 安全地更新暫存變數
+                        st.button(t_text[:12] + "...", key=f"csv_tpl_btn_{idx}_{b_idx}", on_click=set_template_text, args=(csv_note_key, t_text))
                             
-                note_text = st.text_area("📝 6. 詳細操作理由備忘錄：", value=st.session_state[csv_note_key], key=f"csv_txt_area_{idx}")
+                note_text = st.text_area("📝 6. 詳細操作理由備忘錄：", value=default_text, key=csv_note_key)
                 
                 if st.button("💾 確認寫入庫存與歷史帳", key=f"csv_save_btn_{idx}", type="primary"):
                     conn = sqlite3.connect(DB_NAME)
@@ -375,19 +389,19 @@ with tab1:
                             INSERT INTO stock_master (market, stock_id, stock_name, avg_cost, shares, core_reason, period, strategy_type, stop_loss_pct, target_profit_pct, sell_ratio)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (row['market'], sid, row['stock_name'], row['avg_cost'], row['shares'], note_text, csv_period, csv_strat, csv_sl, csv_tp, csv_ratio))
-                        shares_diff = row['shares']
                     else:
-                        cursor.execute("""
-                            UPDATE stock_master SET avg_cost=?, shares=?, period=?, strategy_type=?, stop_loss_pct=?, target_profit_pct=?, sell_ratio=? 
-                            WHERE stock_id=? AND status='持有'
-                        """, (row['avg_cost'], row['shares'], csv_period, csv_strat, csv_sl, csv_tp, csv_ratio, sid))
-                        shares_diff = abs(row['shares'] - ev['old_shares'])
+                        # 先記錄原始資料，待會交給大腦自動算
+                        pass
                         
-                    cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, ?, ?, ?, ?, ?)", (sid, ev['type'], op_date.strftime("%Y-%m-%d"), row['avg_cost'], shares_diff, note_text))
+                    cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, ?, ?, ?, ?, ?)", (sid, ev['type'], op_date.strftime("%Y-%m-%d"), row['avg_cost'], abs(row['shares'] - ev.get('old_shares', 0)), note_text))
                     conn.commit()
                     conn.close()
+                    
+                    # 🎯 交給終極大腦自動同步重算
+                    sync_inventory_from_timeline(sid)
+                    
                     st.session_state.csv_events = [e for i, e in enumerate(st.session_state.csv_events) if i != idx]
-                    if csv_note_key in st.session_state: del st.session_state[csv_note_key]
+                    if f"temp_{csv_note_key}" in st.session_state: del st.session_state[f"temp_{csv_note_key}"]
                     st.success("已成功同步寫入資料庫！")
                     st.rerun()
 
@@ -495,7 +509,7 @@ with tab1:
             suggested_shares = round(stock['shares'] * (ratio_val / 100))
             expected_cash = round(suggested_shares * (take_profit_price), 1)
 
-            # 🚨 置頂大紅大橘警示框 (全剔除開頭換行空格防 CodeBlock 誤判)
+            # 🚨 置頂大紅大橘警示框
             if item['alert_status'] == "stop_loss":
                 st.markdown(f'''<div style="background-color: #ffebee; border-left: 8px solid #c62828; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #b71c1c;">
 <b>🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
@@ -528,7 +542,6 @@ with tab1:
                         if st.button("👍 確定扣減股數並歸檔歷史", key=f"btn_confirm_act_{db_id}", type="primary"):
                             conn = sqlite3.connect(DB_NAME)
                             cursor = conn.cursor()
-                            # 先行記錄這一筆賣出流水帳
                             note_msg = f"滿足馬克【{stock['strategy_type']}】({target_pct_val}%) 分批出場。實際成交價: ${actual_price} / 股數: {actual_shares}"
                             cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) VALUES (?, '減碼', ?, ?, ?, ?)", (sid, actual_date.strftime("%Y-%m-%d"), actual_price, actual_shares, note_msg))
                             conn.commit()
@@ -600,18 +613,16 @@ with tab1:
                     st.caption("⚡ 快速套用加減碼理由模板：")
                     pool = TEMPLATES["🟢 買入/加碼"] if tx_type == "加碼" else TEMPLATES["🔴 賣出/減碼"]
                     
-                    # 【核心關鍵Bug修復】精確錨定理由 Session Key，點擊一鍵完美帶入文字框
-                    note_input_key = f"state_note_op_panel_{db_id}"
-                    if note_input_key not in st.session_state: st.session_state[note_input_key] = ""
+                    # 【核心關鍵Bug修復】利用 Callback 強制寫入暫存狀態，再由 text_area 讀取
+                    tx_note_key = f"panel_note_area_{db_id}"
+                    default_tx_note = st.session_state.get(f"temp_{tx_note_key}", "")
                     
                     cols_tx = st.columns(2)
                     for b_idx, t_text in enumerate(pool):
                         with cols_tx[b_idx % 2]:
-                            if st.button(t_text[:12] + "...", key=f"panel_tpl_btn_{db_id}_{b_idx}"):
-                                st.session_state[note_input_key] = t_text
-                                st.rerun()
+                            st.button(t_text[:12] + "...", key=f"panel_tpl_btn_{db_id}_{b_idx}", on_click=set_template_text, args=(tx_note_key, t_text))
                                 
-                    tx_note = st.text_area("📝 詳細操作理由：", value=st.session_state[note_input_key], key=f"panel_note_area_{db_id}")
+                    tx_note = st.text_area("📝 詳細操作理由：", value=default_tx_note, key=tx_note_key)
                     
                     if st.button("💾 確定執行交易 (系統自動換算)", key=f"panel_tx_submit_{db_id}", type="primary", use_container_width=True):
                         if tx_shares <= 0:
@@ -619,7 +630,6 @@ with tab1:
                         else:
                             conn = sqlite3.connect(DB_NAME)
                             cursor = conn.cursor()
-                            # 僅單純將單筆紀錄打進時序流水帳，不私自在前台進行脆弱乘算
                             cursor.execute("""
                                 INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note) 
                                 VALUES (?, ?, ?, ?, ?, ?)
@@ -627,11 +637,11 @@ with tab1:
                             conn.commit()
                             conn.close()
                             
-                            # 🎯 直接交由終極大腦全自動同步加權計算回寫
+                            # 🎯 交由終極大腦全自動同步加權計算回寫
                             sync_inventory_from_timeline(sid)
                             
                             st.session_state.op_mode[db_id] = False
-                            if note_input_key in st.session_state: del st.session_state[note_input_key]
+                            if f"temp_{tx_note_key}" in st.session_state: del st.session_state[f"temp_{tx_note_key}"]
                             st.success("盤中變動執行完畢，庫存已動態加權對齊！")
                             st.rerun()
 
@@ -644,6 +654,7 @@ with tab1:
                     u_cost = st.number_input("平均成本", value=float(stock['avg_cost']), step=0.01, key=f"u_cost_box_{db_id}")
                     u_shares = st.number_input("目前股數", value=float(stock['shares']), step=1.0, key=f"u_shares_box_{db_id}")
                     u_period = st.selectbox("投資週期分類", ["長期投資", "中期波段", "短期操作"], index=["長期投資", "中期波段", "短期操作"].index(stock['period']), key=f"u_per_box_{db_id}")
+                    
                     u_strat = st.selectbox("減碼紀律策略", ["2倍風險停利法", "強勢波段停利法"], index=["2倍風險停利法", "強勢波段停利法"].index(stock['strategy_type']), key=f"u_str_box_{db_id}")
                     u_sl = st.number_input("初始停損點 (%)", value=float(stock['stop_loss_pct']), step=0.1, key=f"u_sl_box_{db_id}")
                     
