@@ -20,7 +20,7 @@ DB_NAME = "stock_notebook.db"
 # ==========================================
 def sync_inventory_from_timeline(stock_id):
     """
-    【數據連動一致性防線】
+    【數據連動一致性防線：終極會計重審】
     無論操盤手做手動加減碼、CSV匯入，還是在時序軸刪除/修改歷史，
     大腦都會無條件重新清算該股所有流水帳歷史，完美動態追溯對齊庫存股數與加權成本！
     """
@@ -230,7 +230,7 @@ def parse_uploaded_csv(uploaded_file):
     elif '代號' in df.columns and '均價' in df.columns and '目前庫存' in df.columns:
         for _, row in df.iterrows():
             if pd.isna(row['代號']) or str(row['代號']).strip() == '': continue
-            parsed_data.append({'market': '美股', 'stock_id': str(row['代號']).strip(), 'stock_name': str(row['股票名稱']).strip(), 'avg_cost': float(str(row['均價']).replace(',', '')), 'shares': float(str(row['目前庫存']).replace(',', ''))})
+            parsed_data.append({'market': '美股', 'stock_id': str(row['代號']).strip(), 'stock_name': str(row['股票名稱']).strip(), 'avg_cost': float(str(row['均價']).replace(',', '')), 'shares': float(str(row['目の前庫存']).replace(',', ''))})
         return pd.DataFrame(parsed_data), "庫存"
     elif '股票名稱' in df.columns and '成交均價' in df.columns and '股數' in df.columns:
         for _, row in df.iterrows():
@@ -245,14 +245,8 @@ def parse_uploaded_csv(uploaded_file):
     return pd.DataFrame(), "未知"
 
 # ==========================================
-# 4. 全域字典狀態安全初始化
+# 4. 側邊欄工具常態掛載 (備份與還原)
 # ==========================================
-if "yahoo_prices" not in st.session_state: st.session_state["yahoo_prices"] = {}
-if "edit_mode" not in st.session_state: st.session_state["edit_mode"] = {}
-if "op_mode" not in st.session_state: st.session_state["op_mode"] = {}
-if "csv_events" not in st.session_state: st.session_state["csv_events"] = []
-
-# ─── 側邊欄工具常態掛載 ───
 with st.sidebar:
     st.header("📦 系統工具與備份支援")
     if st.button("📤 導出全系統備份 Excel", use_container_width=True):
@@ -279,13 +273,26 @@ with st.sidebar:
             st.rerun()
         except Exception as e: st.error(f"還原失敗: {e}")
 
+    st.markdown("---")
+    st.subheader("🔄 自訂台股 Yahoo 對照表")
+    new_raw = st.text_input("券商 CSV 中文名 (如: 台積電)")
+    new_yid = st.text_input("Yahoo 代號 (如: 2330.TW)")
+    if st.button("➕ 儲存對照項目", use_container_width=True) and new_raw and new_yid:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO stock_mapping (raw_name, yahoo_id) VALUES (?, ?)", (new_raw, new_yid))
+        conn.commit()
+        conn.close()
+        st.success("對照項目儲存成功！")
+        st.rerun()
+
 # ==========================================
-# 5. 五大導覽頁籤全面宣告
+# 5. 全域導覽頁籤宣告
 # ==========================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 今日總覽", "🔍 個股時序", "📈 已實現損益", "📅 月覆盤", "💡 馬克心法"])
 
 # ==========================================
-# 分頁一：今日總覽與資產看板
+# 分頁一：今日動態與資產總覽看板
 # ==========================================
 with tab1:
     st.subheader("📥 匯入最新券商資料")
@@ -322,6 +329,7 @@ with tab1:
                         events.append({'type': ev_type, 'data': row, 'old_shares': old_item['shares'], 'old_cost': old_item['avg_cost']})
             st.session_state["csv_events"] = events
 
+    # 📥 【CSV 匯入互動確認匣】
     if st.session_state["csv_events"]:
         st.warning(f"⚠️ 偵測到 {len(st.session_state['csv_events'])} 筆庫存異動事件！")
         events_to_process = list(st.session_state["csv_events"])
@@ -330,7 +338,7 @@ with tab1:
             row = ev['data']
             sid = row['stock_id']
             with st.expander(f"【{ev['type']}】{sid} {row['stock_name']}", expanded=True):
-                st.write(f"• 異動新股數：{row['shares']:,} 股 | 新均價成本：${row['avg_cost']}")
+                st.write(f"• 異動新股數：{row['shares']:,} 股 | 均價成本：${row['avg_cost']}")
                 
                 csv_period = st.radio("🏷️ 1. 投資週期分類：", ["長期投資", "中期波段", "短期操作"], index=1, key=f"csv_per_{idx}", horizontal=True)
                 csv_strat = st.radio("⚙️ 2. 馬克紀律策略：", ["2倍風險停利法", "強勢波段停利法"], key=f"csv_str_{idx}", horizontal=True)
@@ -366,13 +374,10 @@ with tab1:
                     if ev['type'] == '初始建倉':
                         cursor.execute("INSERT INTO stock_master (market, stock_id, stock_name, avg_cost, shares, core_reason, period, strategy_type, stop_loss_pct, target_profit_pct, sell_ratio) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (row['market'], sid, row['stock_name'], row['avg_cost'], row['shares'], note_text, csv_period, csv_strat, csv_sl, csv_tp, csv_ratio))
                     elif ev['type'] == '減碼':
-                        # 自動推算已實現損益
                         cursor.execute("SELECT avg_cost, shares FROM stock_master WHERE stock_id=? AND status='持有'", (sid,))
                         old_m = cursor.fetchone()
                         if old_m:
-                            old_cost, old_sh = old_m[0], old_m[1]
-                            changed_sh = abs(old_sh - row['shares'])
-                            csv_calculated_pnl = round((row['avg_cost'] - old_cost) * changed_sh, 2)
+                            csv_calculated_pnl = round((row['avg_cost'] - old_m[0]) * abs(old_m[1] - row['shares']), 2)
                     
                     cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note, pnl) VALUES (?, ?, ?, ?, ?, ?, ?)", (sid, ev['type'], op_date.strftime("%Y-%m-%d"), row['avg_cost'], abs(row['shares'] - ev.get('old_shares', 0)), note_text, csv_calculated_pnl))
                     conn.commit()
@@ -483,11 +488,11 @@ with tab1:
 <b>🚨 🚨 紀律防守線觸發：已達嚴格停損點！</b><br>
 <b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
 核心警示：目前即時損益已跌達 <span style="font-weight:bold; font-size:1.1rem;">{profit_pct:.2f}%</span>，觸及防守門檻 (-{stock['stop_loss_pct']:.1f}%)。<br>
-請立即開啟券軟體，理性執行【全數停損】，控制本金風險！
+請立即開啟券商交易軟體，理性手起刀落執行全數停損，嚴控風險本金！
 </div>''', unsafe_allow_html=True)
             elif item['alert_status'] == "take_profit":
                 expected_actual_cash = round(suggested_shares * (y_price if y_price else 0), 1)
-                st.markdown(f'''<div style="background-color: #ffe0b2; border-left: 8px solid #f57000; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #5d4037;">
+                st.markdown(f'''<div style="background-color: #ffe0b2; border-left: 8px solid #f57c00; padding: 15px; border-radius: 6px; margin-bottom: 10px; color: #5d4037;">
 <b>🔥 🚨 超級績效：已達馬克分批獲利停利點！</b><br>
 <b>【{stock['market']}】{sid} {stock['stock_name']} ({stock['period']})</b><br>
 ==========================================================<br>
@@ -511,13 +516,13 @@ with tab1:
                             calculated_pnl = round((actual_price - stock['avg_cost']) * actual_shares, 2)
                             conn = sqlite3.connect(DB_NAME)
                             cursor = conn.cursor()
-                            note_msg = f"滿足馬克【{stock['strategy_type']}】分批出場。"
+                            note_msg = f"滿足馬克【{stock['strategy_type']}】({target_pct_val}%) 分批出場。"
                             cursor.execute("INSERT INTO stock_timeline (stock_id, action_type, op_date, price, shares_changed, note, pnl) VALUES (?, '減碼', ?, ?, ?, ?, ?)", (sid, actual_date.strftime("%Y-%m-%d"), actual_price, actual_shares, note_msg, calculated_pnl))
                             conn.commit()
                             conn.close()
                             sync_inventory_from_timeline(sid)
                             if confirm_key in st.session_state: del st.session_state[confirm_key]
-                            st.success("紀錄已歸帳並動態連動修正庫存與實現淨利！")
+                            st.success("紀錄已歸帳並動態連動修正庫存！")
                             st.rerun()
 
             bg_color = "#e3f2fd" if stock['period'] == '長期投資' else "#ffffff"
@@ -648,12 +653,12 @@ with tab1:
                         conn.close()
                         sync_inventory_from_timeline(u_id)
                         st.session_state["edit_mode"][db_id] = False
-                        st.success("基本細節修改儲存成功！")
+                        st.success("主表格修改儲存成功！")
                         st.rerun()
             st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
 # ==========================================
-# 分頁二：個股生命週期故事書 (歷史修改刪除 - 密碼鎖綁定)
+# 分頁二：個股生命週期故事書 (歷史修改刪除 - 升級多重保險防撞鎖)
 # ==========================================
 with tab2:
     st.subheader("🔍 單一個股生命週期全覆盤")
@@ -681,7 +686,7 @@ with tab2:
         st.write("⏱️ 歷史操作決策流水帳 (歷史刪除修補完全連動)：")
         st.caption("🔥 【操盤防線】在下方時序中點選「刪除紀錄」或「更新紀錄」，庫存母表的總股數與均價將自動動態計量重算，不失真！")
         
-        # 🎯 核心密碼鎖：引入循環 index，杜絕 Duplicate Key
+        # 🎯 核心防撞升級：引入循環 index 流水編號，徹底杜絕 ElementKey 衝突
         for idx_loop, row in enumerate(df_timeline.itertuples()):
             tl_id = getattr(row, 'id')
             row_action = getattr(row, 'action_type')
@@ -697,7 +702,6 @@ with tab2:
                 st.markdown(f"成交價格: `${row_price}` &nbsp;|&nbsp; 變動數量: `{row_shares:,} 股` &nbsp;|&nbsp; 實現損益標記: `${row_pnl:,}`")
                 st.markdown(f"💬 操盤回顧日誌：\n*{row_note}*")
                 
-                # 獨一無二密碼鎖綁定
                 with st.expander("🛠️ 修改或刪除此單筆歷史大事記"):
                     act_k = f"tl_act_{tl_id}_{selected_id}_{idx_loop}"
                     date_k = f"tl_d_{tl_id}_{selected_id}_{idx_loop}"
@@ -715,37 +719,50 @@ with tab2:
                     
                     col_hist_u1, col_hist_u2 = st.columns(2)
                     with col_hist_u1:
-                        st.button("💾 更新紀錄", key=f"tl_submit_upd_{tl_id}_{idx_loop}", type="primary", use_container_width=True, on_click=update_timeline_callback, args=(tl_id, selected_id, act_k, date_k, pr_k, sh_k, pnl_k, no_k))
+                        if st.button("💾 更新紀錄", key=f"tl_submit_upd_{tl_id}_{idx_loop}", type="primary", use_container_width=True):
+                            conn = sqlite3.connect(DB_NAME)
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE stock_timeline SET action_type=?, op_date=?, price=?, shares_changed=?, pnl=?, note=? WHERE id=?", (st.session_state[act_k], st.session_state[date_k], st.session_state[pr_k], st.session_state[sh_k], st.session_state[pnl_k], st.session_state[no_k], tl_id))
+                            conn.commit()
+                            conn.close()
+                            sync_inventory_from_timeline(selected_id)
+                            st.success("流水帳修改成功，總庫存已自動重算！")
+                            st.rerun()
                     with col_hist_u2:
-                        st.button("🗑️ 刪除紀錄", key=f"tl_submit_del_{tl_id}_{idx_loop}", use_container_width=True, on_click=delete_timeline_callback, args=(tl_id, selected_id))
+                        if st.button("🗑️ 刪除紀錄", key=f"tl_submit_del_{tl_id}_{idx_loop}", use_container_width=True):
+                            conn = sqlite3.connect(DB_NAME)
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM stock_timeline WHERE id=?", (tl_id,))
+                            conn.commit()
+                            conn.close()
+                            sync_inventory_from_timeline(selected_id)
+                            st.warning("該紀錄已註銷，總體庫存已動態加回連動修正！")
+                            st.rerun()
 
 # ==========================================
-# 分頁三：📈 已實現損益功能頁 (新增排隊優化與篩選器)
+# 分頁三：📈 已實現損益對帳單功能頁籤 (期望值依序排隊 + 本月篩選)
 # ==========================================
 with tab3:
     st.subheader("📈 已實現交易損益對帳單")
     
-    # 頂部控制面板篩選器：預設本月份
     now_year = datetime.today().year
     now_month = datetime.today().month
     
     col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
     with col_f1:
-        f_year = st.selectbox("篩選年份", ["全部"] + [str(y) for y in range(now_year-2, now_year+3)], index=3) # 預設今年
+        f_year = st.selectbox("篩選年份", ["全部"] + [str(y) for y in range(now_year-2, now_year+3)], index=3)
     with col_f2:
-        f_month = st.selectbox("篩選月份", ["全部"] + [f"{m:02d}" for m in range(1, 13)], index=now_month) # 預設本月
+        f_month = st.selectbox("篩選月份", ["全部"] + [f"{m:02d}" for m in range(1, 13)], index=now_month)
     with col_f3:
-        f_search = st.text_input("🔍 輸入個股名稱/代號搜尋", value="", placeholder="如: NVDA")
+        f_search = st.text_input("🔍 輸入個股名稱/代號搜尋", value="", placeholder="如: DRAM")
 
-    # 讀取具備損益流水帳
     conn = sqlite3.connect(DB_NAME)
     df_all_realized = pd.read_sql_query("SELECT * FROM stock_timeline WHERE action_type IN ('減碼', '已實現出場') OR pnl != 0.0", conn)
     conn.close()
 
     if df_all_realized.empty:
-        st.caption("目前暫無任何已實現損益紀錄。")
+        st.caption("目前系統中尚無任何已實現損益歷史對帳紀錄。")
     else:
-        # 動態轉化時間進行篩選
         df_all_realized['year'] = df_all_realized['op_date'].apply(lambda x: x.split('-')[0] if '-' in str(x) else "")
         df_all_m_str = df_all_realized['op_date'].apply(lambda x: x.split('-')[1] if '-' in str(x) and len(x.split('-'))>1 else "")
         df_all_realized['month'] = df_all_m_str.apply(lambda x: f"{int(x):02d}" if str(x).isdigit() else "")
@@ -757,25 +774,32 @@ with tab3:
         if f_search:
             df_all_realized = df_all_realized[df_all_realized['stock_id'].str.contains(f_search, case=False, na=False)]
 
-        # 🎯 核心馬克逆向紀律排序大腦：虧損巨頭強制排在最前面 (由小到大)，獲利豐厚排在其後 (由大到小)
-        df_loss_part = df_all_realized[df_all_realized['pnl'] < 0].sort_values('pnl', ascending=True)
-        df_profit_part = df_all_realized[df_all_realized['pnl'] >= 0].sort_values('pnl', ascending=False)
-        df_realized_ordered = pd.concat([df_loss_part, df_profit_part])
+        if df_all_realized.empty:
+            st.caption("🔍 當前篩選條件下，無達標的已實現結案紀錄。")
+        else:
+            # 🎯 核心：虧損最大強制排前面直面痛點，獲利飆股隨後排隊
+            df_loss_part = df_all_realized[df_all_realized['pnl'] < 0].sort_values('pnl', ascending=True)
+            df_profit_part = df_all_realized[df_all_realized['pnl'] >= 0].sort_values('pnl', ascending=False)
+            df_realized_ordered = pd.concat([df_loss_part, df_profit_part])
 
-        # 計算當前總體大計
-        total_pnl = df_realized_ordered['pnl'].sum()
-        st.metric(label="📊 當前篩選範圍總實現損益", value=f"${total_pnl:,.1f}", delta=f"{'+' if total_shares_diff:=total_pnl_val if 'total_pnl_val' in locals() else total_pnl >=0 else ''}{total_pnl:,.1f}")
-
-        for r_item in df_realized_ordered.itertuples():
-            pnl_val = getattr(r_item, 'pnl')
-            box_style = "background-color: #ffebee; border-left: 6px solid #c62828; color: #b71c1c;" if pnl_val < 0 else "background-color: #f1f8e9; border-left: 6px solid #33691e; color: #1b5e20;"
-            arrow_lbl = "🔴 虧損檢討" if pnl_val < 0 else "🟢 落袋為安"
+            total_pnl_sum = df_realized_ordered['pnl'].sum()
             
-            st.markdown(f"""<div style="{box_style} border-radius: 6px; padding: 12px; margin-bottom: 8px;">
-<b>{arrow_lbl} | 個股代號：{getattr(r_item, 'stock_id')}</b> ({getattr(r_item, 'op_date')})<br>
-🚪 出場成交價：${getattr(r_item, 'price')} &nbsp;|&nbsp; 變動股數：{getattr(r_item, 'shares_changed'):,} 股<br>
-💰 實體實現損益：<b>${pnl_val:,.1f} 元</b><br>
-💬 盤後決策備忘：<i>{getattr(r_item, 'note')}</i>
+            # 🛑 核心修正：將複雜邏輯在外部拆成乾淨的 delta 變動字串，全線杜絕 f-string 內部解譯崩潰
+            plus_sign = "+" if total_pnl_sum >= 0 else ""
+            delta_string_val = f"{plus_sign}{total_pnl_sum:,.1f}"
+            
+            st.metric(label="📊 當前篩選範圍總實現損益合計", value=f"${total_pnl_sum:,.1f} 元", delta=delta_string_val)
+
+            for r_item in df_realized_ordered.itertuples():
+                pnl_val = getattr(r_item, 'pnl')
+                box_style = "background-color: #ffebee; border-left: 6px solid #c62828; color: #b71c1c;" if pnl_val < 0 else "background-color: #f1f8e9; border-left: 6px solid #33691e; color: #1b5e20;"
+                arrow_lbl = "🔴 虧損檢討 (馬克優先防禦盲點)" if pnl_val < 0 else "🟢 大師超級績效飆股獲利落袋"
+                
+                st.markdown(f"""<div style="{box_style} border-radius: 6px; padding: 12px; margin-bottom: 8px;">
+<b>{arrow_lbl} | 標的代號：{getattr(r_item, 'stock_id')}</b> ({getattr(r_item, 'op_date')})<br>
+🚪 成交單價：${getattr(r_item, 'price')} &nbsp;|&nbsp; 結案變動股數：{getattr(r_item, 'shares_changed'):,} 股<br>
+💰 實體結算損益：<b>${pnl_val:,.1f} 元</b><br>
+💬 交易理由備忘：<i>{getattr(r_item, 'note')}</i>
 </div>""", unsafe_allow_html=True)
 
 # ==========================================
@@ -784,41 +808,35 @@ with tab3:
 with tab4:
     st.subheader("📅 月度資產與紀律心流覆盤")
     
-    # 使用 columns 進行一目了然的左右目錄拆分
+    # 左右雙欄排版
     col_dir_panel, col_edit_panel = st.columns([1, 2])
     
     with col_dir_panel:
         st.markdown("🗂️ **歷年 1-12 月覆盤目錄**")
         
-        # 讀取硬碟所有已經存在實體表中的日誌進行高亮摘要
         conn = sqlite3.connect(DB_NAME)
         df_exist_reviews = pd.read_sql_query("SELECT ym, review_text FROM monthly_reviews ORDER BY ym DESC", conn)
         conn.close()
         exist_review_map = {r['ym']: r['review_text'] for _, r in df_exist_reviews.iterrows()}
         
-        # 動態列出今年與去年的 1-12 月矩陣矩型目錄
-        select_review_year = st.selectbox("調閱年份", [str(datetime.today().year), str(datetime.today().year-1)], index=0, key="dir_review_year_set")
+        select_review_year = st.selectbox("選擇覆盤年份一覽", [str(datetime.today().year), str(datetime.today().year-1)], index=0, key="dir_review_year_set")
         
-        # 依序渲染 1-12 月快捷按鈕矩陣一覽
-        chosen_month = None
+        # 1-12月階梯式目錄渲染
         for m in range(1, 13):
             target_ym_str = f"{select_review_year}-{m:02d}"
             has_data = target_ym_str in exist_review_map
-            lbl = f"📅 {m} 月份日誌 " + ("(🟢 已存)" if has_data else "(⚪ 空白)")
+            lbl = f"📅 {m:02d} 月份日誌 " + ("(🟢 有紀錄)" if has_data else "(⚪ 空白)")
             
-            # 使用小按鈕一覽排隊，點擊直接將月份注入 Session
             if st.button(lbl, key=f"dir_month_btn_{target_ym_str}", use_container_width=True):
                 st.session_state["active_review_ym"] = target_ym_str
                 
-        # 預設錨定本月
         if "active_review_ym" not in st.session_state:
             st.session_state["active_review_ym"] = datetime.today().strftime("%Y-%m")
 
     with col_edit_panel:
         active_ym = st.session_state["active_review_ym"]
-        st.markdown(f"✍️ **正在編輯/調閱月份：`{active_ym}`**")
+        st.markdown(f"✍️ **正在編輯與永續調閱月份：`{active_ym}`**")
         
-        # 真實從硬碟 SQLite 取出存檔
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT review_text FROM monthly_reviews WHERE ym=?", (active_ym,))
@@ -827,20 +845,19 @@ with tab4:
         
         current_db_review_text = db_review_row[0] if db_review_row else ""
         
-        # 真實渲染文字編輯器
-        txt_review_input = st.text_area("寫下本月的紀律執行心得與優缺點檢討：", value=current_db_review_text, key=f"real_review_editor_key_{active_ym}", height=250)
+        txt_review_input = st.text_area("交易員自我核心檢討與盲點覆盤：", value=current_db_review_text, key=f"real_review_editor_key_{active_ym}", height=300)
         
-        if st.button("💾 儲存此月度檢討日誌", key=f"save_review_btn_{active_ym}", type="primary", use_container_width=True):
+        if st.button("💾 永久寫入此月度檢討日誌", key=f"save_review_btn_{active_ym}", type="primary", use_container_width=True):
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
             cursor.execute("INSERT OR REPLACE INTO monthly_reviews (ym, review_text) VALUES (?, ?)", (active_ym, txt_review_input))
             conn.commit()
             conn.close()
-            st.success(f"🎉 成功！{active_ym} 交易員心態檢討日誌已永久寫入硬碟資料庫。")
+            st.success(f"🎉 成功！{active_ym} 交易紀錄與心態心流日誌已寫入 SQLite 資料庫硬碟！")
             st.rerun()
 
 # ==========================================
-# 分頁五：馬克心法交易新法
+# 分頁五：馬克心法交易新法 (完整名言交織指南)
 # ==========================================
 with tab5:
     st.markdown('''
@@ -857,7 +874,7 @@ with tab5:
 * **📊 賺賠比與期望值方程式**
   > *「交易的秘密在於賺大賠小，而不是每次操作都對。只要賺賠比拉高，即使勝率只有 30%，你依然能成為富翁。」*
   
-  市場上多數人著迷於尋找百分之百獲勝的聖盃，打擊率不重要，真正的期望值規模才是關鍵。讓虧損鎖在極小範圍，獲利放大到停損的 2 倍以上，資產才能真正實現複利噴發。
+  市場上多數人著迷於尋找百分之百獲勝的聖盃，打擊率不重要，真正的期望值規模才是關鍵。讓虧損鎖在極小範圍，獲利放大到停損的 2 倍以上，資產才能真正實現滾動複利。
 
 ---
 ### 💰 二、 經典策略：2倍風險停利法 (不敗的數學防禦)
@@ -899,5 +916,5 @@ with tab5:
 ### 📈 五、 技術型態：VCP 波幅收窄型態 (籌碼的精準解讀)
 * **🔍 尋找市場的臨界點 (Pivot Point)**
   > *「我尋找的不是便宜的低價股票，而是準備好要瘋狂飆漲的股票。」*
-  飆股噴發前，籌碼會從散戶（軟手）轉移到主力大戶（強手）手中。表現出每次拉回修正的幅度越來越小（如：30% ➔ 15% ➔ 7% ➔ 3%），且在最右側成交量極度萎縮窒息，代表市場上想賣的人都賣光了。此時只要出現一根**帶量突破臨界點（Pivot）**的長紅K，就是最完美的初始進場一擊。
+  飆股噴發前，籌碼會從散戶（軟手）轉移到主力大戶（強手）手中。表現出每次拉回修正的幅度越來越小（如：30% ➔ 15% ➔ 7% ➔ 3%），且在最右側成交量極度萎縮窒息，代表沒人想賣了。此時只要出現一根**帶量突破臨界點（Pivot）**的長紅K，就是最完美的初始進場一擊。
 ''')
